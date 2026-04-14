@@ -3,22 +3,6 @@ use axum_extra::extract::cookie::Cookie;
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-pub fn get_mime_type(ext: Option<&str>) -> &str {
-    match ext {
-        None => "text/plain",
-        Some(ext) => match ext {
-            "html" => "text/html",
-            "css" => "text/css",
-            "js" => "application/javascript",
-            "wasm" => "application/wasm",
-            "png" => "image/png",
-            "ico" => "image/x-icon",
-            "svg" => "image/svg+xml",
-            _ => "text/plain",
-        },
-    }
-}
-
 pub fn should_use_https(
     ip: IpAddr,
     has_certificate: bool,

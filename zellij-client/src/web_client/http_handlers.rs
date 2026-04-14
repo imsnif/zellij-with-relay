@@ -1,6 +1,6 @@
 use crate::web_client::authentication::{IsReadOnly, SessionTokenHash};
 use crate::web_client::types::{AppState, CreateClientIdResponse, LoginRequest, LoginResponse};
-use crate::web_client::utils::{get_mime_type, parse_cookies};
+use crate::web_client::utils::parse_cookies;
 use axum::{
     extract::{Path as AxumPath, Request, State},
     http::{header, StatusCode},
@@ -8,7 +8,6 @@ use axum::{
     Json,
 };
 use axum_extra::extract::cookie::{Cookie, SameSite};
-use include_dir;
 use uuid::Uuid;
 use zellij_utils::{consts::VERSION, web_authentication_tokens::create_session_token};
 
@@ -19,14 +18,6 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&#x27;")
 }
-
-const WEB_CLIENT_PAGE: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/",
-    "assets/index.html"
-));
-
-const ASSETS_DIR: include_dir::Dir<'_> = include_dir::include_dir!("$CARGO_MANIFEST_DIR/assets");
 
 pub async fn serve_html(State(state): State<AppState>, request: Request) -> Html<String> {
     let cookies = parse_cookies(&request);
@@ -44,7 +35,7 @@ pub async fn serve_html(State(state): State<AppState>, request: Request) -> Html
     );
 
     let html = Html(
-        WEB_CLIENT_PAGE
+        zellij_web_client_assets::INDEX_HTML
             .replace("IS_AUTHENTICATED", &format!("{}", auth_value))
             .replace("BASE_URL", &base_url),
     );
@@ -143,18 +134,15 @@ pub async fn create_new_client(
 }
 
 pub async fn get_static_asset(AxumPath(path): AxumPath<String>) -> impl IntoResponse {
-    let path = path.trim_start_matches('/');
-
-    match ASSETS_DIR.get_file(path) {
+    match zellij_web_client_assets::lookup(&path) {
         None => (
             [(header::CONTENT_TYPE, "text/html")],
             "Not Found".as_bytes(),
         ),
-        Some(file) => {
-            let ext = file.path().extension().and_then(|ext| ext.to_str());
-            let mime_type = get_mime_type(ext);
-            ([(header::CONTENT_TYPE, mime_type)], file.contents())
-        },
+        Some(asset) => (
+            [(header::CONTENT_TYPE, asset.content_type)],
+            asset.contents,
+        ),
     }
 }
 

@@ -4,14 +4,42 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use tokio::sync::Notify;
+use axum::extract::ws::Message as WsMessage;
+use tokio::sync::{mpsc, oneshot, Notify};
 use uuid::Uuid;
 
-/// Metadata the relay remembers for an active tunnel. Phase 1 does not yet
-/// hold the control/terminal WebSocket sinks for forwarding — the control
-/// handler owns its socket, and Phase 2 will restructure this once frames
-/// need to be routed to viewers.
-#[derive(Debug)]
+/// Result of an AuthChallenge round-trip through the control tunnel.
+#[derive(Debug, Clone)]
+pub struct AuthResponseResult {
+    pub accepted: bool,
+    pub client_id: u32,
+    pub is_read_only: bool,
+    pub session_token_hash: String,
+}
+
+/// Relay-side per-viewer bookkeeping. Keyed by the Zellij-allocated
+/// `client_id` in `TunnelEntry::viewers`. Each sink is populated
+/// independently when the respective WS upgrades; the record itself is
+/// inserted when the first WS (either control or terminal) arrives.
+#[derive(Default)]
+pub struct ViewerHandle {
+    pub control_sink_tx: Option<mpsc::UnboundedSender<WsMessage>>,
+    pub terminal_sink_tx: Option<mpsc::UnboundedSender<WsMessage>>,
+    pub disconnect_terminal: Option<oneshot::Sender<()>>,
+    pub disconnect_control: Option<oneshot::Sender<()>>,
+    pub is_read_only: bool,
+}
+
+/// Relay-side session cookie state: maps an opaque session id stored in the
+/// `relay_session` cookie to the `client_id` allocated by Zellij.
+#[derive(Debug, Clone)]
+pub struct ViewerSession {
+    pub client_id: u32,
+    pub token_hash: String,
+    pub is_read_only: bool,
+}
+
+/// Metadata and wiring the relay keeps for an active tunnel.
 pub struct TunnelEntry {
     pub tunnel_id: Uuid,
     pub slug: String,
@@ -23,6 +51,30 @@ pub struct TunnelEntry {
     /// terminal handler can unblock the waiting control-side logic.
     pub terminal_linked: Arc<Notify>,
     pub terminal_linked_flag: Arc<Mutex<bool>>,
+    /// Encoded `ControlMessage` bytes → control-tunnel writer task.
+    pub control_tx: mpsc::UnboundedSender<Vec<u8>>,
+    /// Encoded `TerminalMessage` bytes → terminal-tunnel writer task.
+    /// `None` until the terminal WS is linked.
+    pub terminal_tx: Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>,
+    /// Outstanding AuthChallenge round-trips awaiting `AuthResponse`.
+    pub pending_auths: Mutex<HashMap<Vec<u8>, oneshot::Sender<AuthResponseResult>>>,
+    /// Active viewers, keyed by the `client_id` allocated by Zellij.
+    pub viewers: Mutex<HashMap<u32, ViewerHandle>>,
+    /// Sessions indexed by the random session cookie id.
+    pub sessions: Mutex<HashMap<Uuid, ViewerSession>>,
+}
+
+impl std::fmt::Debug for TunnelEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TunnelEntry")
+            .field("tunnel_id", &self.tunnel_id)
+            .field("slug", &self.slug)
+            .field("public_url", &self.public_url)
+            .field("session_name", &self.session_name)
+            .field("zellij_version", &self.zellij_version)
+            .field("created_at", &self.created_at)
+            .finish()
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -45,9 +97,9 @@ impl Registry {
         g.get(slug).cloned()
     }
 
-    pub fn remove(&self, slug: &str) {
+    pub fn remove(&self, slug: &str) -> Option<Arc<TunnelEntry>> {
         let mut g = self.inner.lock().unwrap();
-        g.remove(slug);
+        g.remove(slug)
     }
 
     #[cfg(test)]
@@ -61,6 +113,7 @@ mod tests {
     use super::*;
 
     fn make_entry(slug: &str) -> Arc<TunnelEntry> {
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
         Arc::new(TunnelEntry {
             tunnel_id: Uuid::new_v4(),
             slug: slug.into(),
@@ -70,6 +123,11 @@ mod tests {
             created_at: Instant::now(),
             terminal_linked: Arc::new(Notify::new()),
             terminal_linked_flag: Arc::new(Mutex::new(false)),
+            control_tx,
+            terminal_tx: Mutex::new(None),
+            pending_auths: Mutex::new(HashMap::new()),
+            viewers: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(HashMap::new()),
         })
     }
 

@@ -46,7 +46,7 @@ use authentication::auth_middleware;
 use http_handlers::{
     create_new_client, get_static_asset, login_handler, serve_html, version_handler,
 };
-use ipc_listener::listen_to_web_server_instructions;
+use ipc_listener::{listen_to_web_server_instructions, RelayContext};
 
 use types::{
     AppState, ClientOsApiFactory, ConnectionTable, RealClientOsApiFactory, RealSessionManager,
@@ -211,11 +211,20 @@ pub async fn serve_web_client(
     let state = AppState {
         connection_table: connection_table.clone(),
         config: Arc::new(Mutex::new(config)),
+        config_options: config_options.clone(),
+        config_file_path: config_file_path.clone(),
+        session_manager: session_manager.clone(),
+        client_os_api_factory: client_os_api_factory.clone(),
+        is_https,
+    };
+
+    let relay_ctx = RelayContext {
+        connection_table: connection_table.clone(),
+        os_api_factory: client_os_api_factory.clone(),
+        session_manager: session_manager.clone(),
+        config: state.config.clone(),
         config_options,
         config_file_path,
-        session_manager,
-        client_os_api_factory,
-        is_https,
     };
 
     tokio::spawn({
@@ -226,6 +235,7 @@ pub async fn serve_web_client(
                 &format!("{}", id),
                 web_server_ip,
                 web_server_port,
+                relay_ctx,
             )
             .await;
         }

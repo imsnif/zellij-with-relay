@@ -28,6 +28,49 @@ message TunnelReady {
   string tunnel_id = 1;
 }
 
+// Relay → Zellij: validate this token hash and, if accepted, allocate a
+// client_id. The relay echoes `request_id` in the matching AuthResponse so
+// multiple in-flight challenges can be demultiplexed.
+message AuthChallenge {
+  bytes request_id = 1;
+  string token_hash = 2;
+}
+
+// Zellij → Relay: result of an AuthChallenge.
+message AuthResponse {
+  bytes request_id = 1;
+  uint32 client_id = 2;
+  bool accepted = 3;
+  bool is_read_only = 4;
+  string session_token_hash = 5;
+}
+
+// Relay → Zellij: a new viewer has attached to the tunnel.
+message ClientConnected {
+  uint32 client_id = 1;
+}
+
+// Relay → Zellij (or Zellij → Relay on server-initiated disconnect): the
+// viewer is gone. After this frame, no additional frames for `client_id`
+// will be generated.
+message ClientDisconnected {
+  uint32 client_id = 1;
+}
+
+// Per-client control-plane payload (text WebSocket frames in the local
+// web client's JSON control protocol).
+message ControlFrameData {
+  uint32 client_id = 1;
+  bytes data = 2;
+}
+
+// Per-client terminal-plane payload. Phase 2: plaintext. Phase 3+: ciphertext
+// (`nonce || ciphertext`).
+message TerminalFrameData {
+  uint32 client_id = 1;
+  bytes data = 2;
+}
+
 // Envelope for all control-tunnel messages. All Phase 1 messages that travel
 // on the control tunnel are wrapped in this oneof so that Phase 2+ can add
 // variants (AuthChallenge, ClientConnected, ControlFrame, ...) without
@@ -37,6 +80,11 @@ message ControlFrame {
     TunnelAuth auth = 1;
     TunnelEstablished established = 2;
     TunnelError error = 3;
+    AuthChallenge auth_challenge = 4;
+    AuthResponse auth_response = 5;
+    ClientConnected client_connected = 6;
+    ClientDisconnected client_disconnected = 7;
+    ControlFrameData control_frame_data = 8;
   }
 }
 
@@ -45,5 +93,6 @@ message TerminalFrame {
   oneof payload {
     TunnelReady ready = 1;
     TunnelError error = 2;
+    TerminalFrameData terminal_frame_data = 3;
   }
 }
