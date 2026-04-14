@@ -115,24 +115,38 @@ pub fn build(sh: &Shell, flags: flags::Build) -> anyhow::Result<()> {
 }
 
 fn run_proto_codegen(sh: &Shell) {
-    let zellij_utils_basedir = crate::project_root().join("zellij-utils");
-    let _pd = sh.push_dir(&zellij_utils_basedir);
-
-    let specs: &[(&str, &str, &str)] = &[
-        ("assets/prost", "src/plugin_api", "generated_plugin_api.rs"),
+    // (base_crate_dir, out_subdir, src_subdir, include_file)
+    let specs: &[(&str, &str, &str, &str)] = &[
         (
+            "zellij-utils",
+            "assets/prost",
+            "src/plugin_api",
+            "generated_plugin_api.rs",
+        ),
+        (
+            "zellij-utils",
             "assets/prost_ipc",
             "src/client_server_contract",
             "generated_client_server_api.rs",
         ),
         (
+            "zellij-utils",
             "assets/prost_web_server",
             "src/web_server_contract",
             "generated_web_server_api.rs",
         ),
+        (
+            "zellij-relay-protocol",
+            "assets/prost_relay",
+            "src/relay_protocol",
+            "generated_relay_protocol.rs",
+        ),
     ];
 
-    for (out_subdir, src_subdir, include_file) in specs {
+    for (base_crate, out_subdir, src_subdir, include_file) in specs {
+        let base_dir = crate::project_root().join(base_crate);
+        let _pd = sh.push_dir(&base_dir);
+
         let out_dir = sh.current_dir().join(out_subdir);
         let src_dir = sh.current_dir().join(src_subdir);
         std::fs::create_dir_all(&out_dir).unwrap();

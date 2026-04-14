@@ -665,6 +665,12 @@ fn host_run_plugin_command(mut caller: Caller<'_, PluginEnv>) {
                     PluginCommand::QueryWebServerStatus => query_web_server_status(env),
                     PluginCommand::ShareCurrentSession => share_current_session(env),
                     PluginCommand::StopSharingCurrentSession => stop_sharing_current_session(env),
+                    PluginCommand::ShareCurrentSessionToRelay => {
+                        share_current_session_to_relay(env)
+                    },
+                    PluginCommand::StopSharingCurrentSessionFromRelay => {
+                        stop_sharing_current_session_from_relay(env)
+                    },
                     PluginCommand::SetSelfMouseSelectionSupport(selection_support) => {
                         set_self_mouse_selection_support(env, selection_support);
                     },
@@ -4948,6 +4954,20 @@ fn stop_sharing_current_session(env: &PluginEnv) {
         .send_to_server(ServerInstruction::StopSharingCurrentSession(env.client_id));
 }
 
+fn share_current_session_to_relay(env: &PluginEnv) {
+    let _ = env
+        .senders
+        .send_to_server(ServerInstruction::ShareCurrentSessionToRelay(env.client_id));
+}
+
+fn stop_sharing_current_session_from_relay(env: &PluginEnv) {
+    let _ = env
+        .senders
+        .send_to_server(ServerInstruction::StopSharingCurrentSessionFromRelay(
+            env.client_id,
+        ));
+}
+
 fn group_and_ungroup_panes(
     env: &PluginEnv,
     panes_to_group: Vec<PaneId>,
@@ -5456,6 +5476,8 @@ fn check_command_permission(
         },
         PluginCommand::ShareCurrentSession
         | PluginCommand::StopSharingCurrentSession
+        | PluginCommand::ShareCurrentSessionToRelay
+        | PluginCommand::StopSharingCurrentSessionFromRelay
         | PluginCommand::StopWebServer
         | PluginCommand::QueryWebServerStatus
         | PluginCommand::GenerateWebLoginToken(..)

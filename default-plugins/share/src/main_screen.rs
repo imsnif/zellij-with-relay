@@ -27,6 +27,7 @@ pub struct MainScreen<'a> {
     hover_coordinates: Option<(usize, usize)>,
     info: &'a Option<String>,
     link_executable: &'a Option<&'a str>,
+    remote_share_url: &'a Option<String>,
 }
 
 impl<'a> MainScreen<'a> {
@@ -50,6 +51,7 @@ impl<'a> MainScreen<'a> {
         hover_coordinates: Option<(usize, usize)>,
         info: &'a Option<String>,
         link_executable: &'a Option<&'a str>,
+        remote_share_url: &'a Option<String>,
     ) -> Self {
         Self {
             token_list_is_empty,
@@ -64,6 +66,7 @@ impl<'a> MainScreen<'a> {
             hover_coordinates,
             info,
             link_executable,
+            remote_share_url,
         }
     }
 
@@ -114,6 +117,13 @@ impl<'a> MainScreen<'a> {
         let mut total_height =
             2 + web_server_height + 1 + current_session_height + 1 + usage_height;
 
+        total_height += 2;
+        let hint_width = match self.remote_share_url {
+            Some(url) => format!("Public URL: {} (<I> - Stop Public Sharing)", url).len(),
+            None => "Public URL: <not shared> (<i> - Share to Public URL)".len(),
+        };
+        max_width = max_width.max(hint_width);
+
         if self.connection_is_unencrypted() {
             let warning_width = self.unencrypted_warning_width();
             max_width = max_width.max(warning_width);
@@ -138,6 +148,7 @@ impl<'a> MainScreen<'a> {
 
         current_y = self.render_web_server_section(layout, current_y, state);
         current_y = self.render_current_session_section(layout, current_y, state);
+        current_y = self.render_remote_share_url(layout, current_y);
         current_y = self.render_usage_section(layout, current_y);
         current_y = self.render_warnings_and_help(layout, current_y, state);
 
@@ -209,6 +220,26 @@ impl<'a> MainScreen<'a> {
         }
 
         y + layout.web_server_height + 1
+    }
+
+    fn render_remote_share_url(&self, layout: &Layout, y: usize) -> usize {
+        match self.remote_share_url {
+            Some(url) => {
+                let label = format!("Public URL: {} (<I> - Stop Public Sharing)", url);
+                let stop_hint_start = label.len() - "(<I> - Stop Public Sharing)".len();
+                let text = Text::new(&label)
+                    .color_range(2, ..10)
+                    .color_range(3, stop_hint_start..);
+                print_text_with_coordinates(text, layout.base_x, y, None, None);
+                y + 2
+            },
+            None => {
+                let label = "Public URL: <not shared> (<i> - Share to Public URL)";
+                let text = Text::new(label).color_range(2, ..10).color_range(3, 25..);
+                print_text_with_coordinates(text, layout.base_x, y, None, None);
+                y + 2
+            },
+        }
     }
 
     fn render_usage_section(&self, layout: &Layout, y: usize) -> usize {

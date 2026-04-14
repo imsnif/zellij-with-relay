@@ -1914,6 +1914,8 @@ impl TryFrom<ProtobufModeUpdatePayload> for ModeInfo {
 
         let web_server_capability = protobuf_mode_update_payload.web_server_capability;
 
+        let remote_share_url = protobuf_mode_update_payload.remote_share_url;
+
         let mode_info = ModeInfo {
             mode: current_mode,
             keybinds,
@@ -1930,6 +1932,7 @@ impl TryFrom<ProtobufModeUpdatePayload> for ModeInfo {
             web_server_ip,
             web_server_port,
             web_server_capability,
+            remote_share_url,
         };
         Ok(mode_info)
     }
@@ -1954,6 +1957,7 @@ impl TryFrom<ModeInfo> for ProtobufModeUpdatePayload {
         let web_server_ip = mode_info.web_server_ip.map(|i| format!("{}", i));
         let web_server_port = mode_info.web_server_port.map(|p| p as u32);
         let web_server_capability = mode_info.web_server_capability;
+        let remote_share_url = mode_info.remote_share_url;
         let mut protobuf_input_mode_keybinds: Vec<ProtobufInputModeKeybinds> = vec![];
         for (input_mode, input_mode_keybinds) in mode_info.keybinds {
             let mode: ProtobufInputMode = input_mode.try_into()?;
@@ -1994,6 +1998,7 @@ impl TryFrom<ModeInfo> for ProtobufModeUpdatePayload {
             web_server_ip,
             web_server_port,
             web_server_capability,
+            remote_share_url,
         })
     }
 }
@@ -2309,6 +2314,7 @@ fn serialize_mode_update_event_with_non_default_values() {
         web_server_ip: IpAddr::from_str("127.0.0.1").ok(),
         web_server_port: Some(8082),
         web_server_capability: Some(true),
+        remote_share_url: None,
     });
     let protobuf_event: ProtobufEvent = mode_update_event.clone().try_into().unwrap();
     let serialized_protobuf_event = protobuf_event.encode_to_vec();
@@ -2319,6 +2325,46 @@ fn serialize_mode_update_event_with_non_default_values() {
         mode_update_event, deserialized_event,
         "Event properly serialized/deserialized without change"
     );
+}
+
+#[test]
+fn serialize_mode_update_event_with_remote_share_url_some() {
+    use prost::Message;
+    let mode_info = ModeInfo {
+        remote_share_url: Some("ws://x".to_owned()),
+        ..Default::default()
+    };
+    let mode_update_event = Event::ModeUpdate(mode_info);
+    let protobuf_event: ProtobufEvent = mode_update_event.clone().try_into().unwrap();
+    let serialized = protobuf_event.encode_to_vec();
+    let decoded_proto: ProtobufEvent = Message::decode(serialized.as_slice()).unwrap();
+    let decoded_event: Event = decoded_proto.try_into().unwrap();
+    match decoded_event {
+        Event::ModeUpdate(info) => {
+            assert_eq!(info.remote_share_url, Some("ws://x".to_owned()));
+        },
+        other => panic!("expected ModeUpdate, got {:?}", other),
+    }
+}
+
+#[test]
+fn serialize_mode_update_event_with_remote_share_url_none() {
+    use prost::Message;
+    let mode_info = ModeInfo {
+        remote_share_url: None,
+        ..Default::default()
+    };
+    let mode_update_event = Event::ModeUpdate(mode_info);
+    let protobuf_event: ProtobufEvent = mode_update_event.clone().try_into().unwrap();
+    let serialized = protobuf_event.encode_to_vec();
+    let decoded_proto: ProtobufEvent = Message::decode(serialized.as_slice()).unwrap();
+    let decoded_event: Event = decoded_proto.try_into().unwrap();
+    match decoded_event {
+        Event::ModeUpdate(info) => {
+            assert_eq!(info.remote_share_url, None);
+        },
+        other => panic!("expected ModeUpdate, got {:?}", other),
+    }
 }
 
 #[test]

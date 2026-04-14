@@ -54,6 +54,7 @@ mod not_wasm {
             web_server_ip: None,
             web_server_port: None,
             web_server_capability: None,
+            remote_share_url: None,
         }
     }
 

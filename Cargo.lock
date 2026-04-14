@@ -2082,6 +2082,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "matchers"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
+dependencies = [
+ "regex-automata",
+]
+
+[[package]]
 name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2270,6 +2279,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c70f219e21142367c70c0b30c6a9e3a14d55b4d12a204d897fbec83a0363f081"
 dependencies = [
  "winapi",
+]
+
+[[package]]
+name = "nu-ansi-term"
+version = "0.50.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
+dependencies = [
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2766,7 +2784,18 @@ checksum = "af83e617f331cc6ae2da5443c602dfa5af81e517212d9d611a5b3ba1777b5370"
 dependencies = [
  "aho-corasick 1.0.1",
  "memchr",
- "regex-syntax",
+ "regex-syntax 0.7.1",
+]
+
+[[package]]
+name = "regex-automata"
+version = "0.4.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e1dd4122fc1595e8162618945476892eefca7b88c52820e74af6262213cae8f"
+dependencies = [
+ "aho-corasick 1.0.1",
+ "memchr",
+ "regex-syntax 0.8.10",
 ]
 
 [[package]]
@@ -2774,6 +2803,12 @@ name = "regex-syntax"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a5996294f19bd3aae0453a862ad728f60e6600695733dd5df01da90c54363a3c"
+
+[[package]]
+name = "regex-syntax"
+version = "0.8.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "ring"
@@ -3166,6 +3201,15 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest",
+]
+
+[[package]]
+name = "sharded-slab"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
+dependencies = [
+ "lazy_static",
 ]
 
 [[package]]
@@ -3885,6 +3929,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e672c95779cf947c5311f83787af4fa8fffd12fb27e4993211a84bdfd9610f9c"
 dependencies = [
  "once_cell",
+ "valuable",
 ]
 
 [[package]]
@@ -3895,6 +3940,35 @@ checksum = "97d095ae15e245a057c8e8451bab9b3ee1e1f68e9ba2b4fbc18d0ac5237835f2"
 dependencies = [
  "pin-project",
  "tracing",
+]
+
+[[package]]
+name = "tracing-log"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee855f1f400bd0e5c02d150ae5de3840039a3f54b025156404e34c23c03f47c3"
+dependencies = [
+ "log",
+ "once_cell",
+ "tracing-core",
+]
+
+[[package]]
+name = "tracing-subscriber"
+version = "0.3.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2054a14f5307d601f88daf0553e1cbf472acc4f2c51afab632431cdcd72124d5"
+dependencies = [
+ "matchers",
+ "nu-ansi-term",
+ "once_cell",
+ "regex-automata",
+ "sharded-slab",
+ "smallvec",
+ "thread_local",
+ "tracing",
+ "tracing-core",
+ "tracing-log",
 ]
 
 [[package]]
@@ -4047,6 +4121,12 @@ dependencies = [
  "getrandom 0.3.1",
  "serde",
 ]
+
+[[package]]
+name = "valuable"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "vcpkg"
@@ -4788,7 +4868,7 @@ dependencies = [
 
 [[package]]
 name = "zellij"
-version = "0.44.2"
+version = "0.45.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4815,7 +4895,7 @@ dependencies = [
 
 [[package]]
 name = "zellij-client"
-version = "0.44.2"
+version = "0.45.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4857,13 +4937,43 @@ dependencies = [
  "url",
  "urlencoding",
  "uuid",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
+ "zellij-relay-protocol",
  "zellij-utils",
 ]
 
 [[package]]
+name = "zellij-relay"
+version = "0.45.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "futures-util",
+ "log",
+ "prost",
+ "rand 0.8.5",
+ "serde",
+ "serial_test",
+ "tokio",
+ "tokio-tungstenite 0.20.1",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "zellij-relay-protocol",
+]
+
+[[package]]
+name = "zellij-relay-protocol"
+version = "0.45.0"
+dependencies = [
+ "anyhow",
+ "prost",
+ "serde",
+]
+
+[[package]]
 name = "zellij-server"
-version = "0.44.2"
+version = "0.45.0"
 dependencies = [
  "ansi_term",
  "anyhow",
@@ -4907,13 +5017,13 @@ dependencies = [
  "vte 0.11.0",
  "wasmi",
  "wasmi_wasi",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
  "zellij-utils",
 ]
 
 [[package]]
 name = "zellij-tile"
-version = "0.44.2"
+version = "0.45.0"
 dependencies = [
  "clap",
  "prost",
@@ -4926,14 +5036,14 @@ dependencies = [
 
 [[package]]
 name = "zellij-tile-utils"
-version = "0.44.2"
+version = "0.45.0"
 dependencies = [
  "ansi_term",
 ]
 
 [[package]]
 name = "zellij-utils"
-version = "0.44.2"
+version = "0.45.0"
 dependencies = [
  "anyhow",
  "backtrace",
@@ -4983,7 +5093,7 @@ dependencies = [
  "url",
  "uuid",
  "winapi",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

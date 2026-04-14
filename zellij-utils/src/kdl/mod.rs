@@ -2798,6 +2798,9 @@ impl Options {
         let enforce_https_for_localhost =
             kdl_property_first_arg_as_bool_or_error!(kdl_options, "enforce_https_for_localhost")
                 .map(|(v, _)| v);
+        let relay_server_url =
+            kdl_property_first_arg_as_string_or_error!(kdl_options, "relay_server_url")
+                .map(|(string, _entry)| string.to_string());
         let post_command_discovery_hook =
             kdl_property_first_arg_as_string_or_error!(kdl_options, "post_command_discovery_hook")
                 .map(|(hook, _entry)| hook.to_string());
@@ -2871,6 +2874,7 @@ impl Options {
             web_server_cert,
             web_server_key,
             enforce_https_for_localhost,
+            relay_server_url,
             post_command_discovery_hook,
             client_async_worker_tasks,
         })
@@ -3890,6 +3894,34 @@ impl Options {
             None
         }
     }
+    fn relay_server_url_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
+        let comment_text = format!(
+            "{}\n{}\n{}\n{}",
+            "/// WebSocket URL of the Zellij relay used by 'Share to Internet'.",
+            "/// Example: \"ws://localhost:8765\" for a locally-run `zellij-relay`,",
+            "/// or \"wss://relay.zellij.dev\" for the public relay.",
+            "// ",
+        );
+
+        let create_node = |url: &str| -> KdlNode {
+            let mut node = KdlNode::new("relay_server_url");
+            node.push(KdlValue::String(url.to_string()));
+            node
+        };
+        if let Some(url) = &self.relay_server_url {
+            let mut node = create_node(url);
+            if add_comments {
+                node.set_leading(format!("{}\n", comment_text));
+            }
+            Some(node)
+        } else if add_comments {
+            let mut node = create_node("ws://localhost:8765");
+            node.set_leading(format!("{}\n// ", comment_text));
+            Some(node)
+        } else {
+            None
+        }
+    }
     fn enforce_https_for_localhost_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
         let comment_text = format!(
             "{}\n{}\n{}\n{}\n{}\n{}\n{}",
@@ -4356,6 +4388,9 @@ impl Options {
             self.enforce_https_for_localhost_to_kdl(add_comments)
         {
             nodes.push(enforce_https_for_localhost);
+        }
+        if let Some(relay_server_url) = self.relay_server_url_to_kdl(add_comments) {
+            nodes.push(relay_server_url);
         }
         if let Some(stacked_resize) = self.stacked_resize_to_kdl(add_comments) {
             nodes.push(stacked_resize);
@@ -7252,4 +7287,36 @@ fn osc8_hyperlinks_config_parsing() {
     let serialized = config.to_string(false);
     let deserialized = Config::from_kdl(&serialized, None).unwrap();
     assert_eq!(deserialized.options.osc8_hyperlinks, Some(true));
+}
+
+#[test]
+fn relay_server_url_kdl_parse() {
+    let raw = r##"
+        relay_server_url "ws://localhost:8765"
+    "##;
+    let config = Config::from_kdl(raw, None).unwrap();
+    assert_eq!(
+        config.options.relay_server_url,
+        Some("ws://localhost:8765".to_string())
+    );
+}
+
+#[test]
+fn relay_server_url_kdl_parse_missing_is_none() {
+    let raw = r##"
+    "##;
+    let config = Config::from_kdl(raw, None).unwrap();
+    assert_eq!(config.options.relay_server_url, None);
+}
+
+#[test]
+fn relay_server_url_kdl_serialize_roundtrip() {
+    let raw = r##"
+        relay_server_url "ws://x"
+    "##;
+    let config = Config::from_kdl(raw, None).unwrap();
+    assert_eq!(config.options.relay_server_url, Some("ws://x".to_string()));
+    let serialized = config.to_string(false);
+    let reparsed = Config::from_kdl(&serialized, None).unwrap();
+    assert_eq!(reparsed.options.relay_server_url, Some("ws://x".to_string()));
 }

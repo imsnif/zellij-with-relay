@@ -1738,6 +1738,10 @@ pub struct ModeInfo {
     pub web_server_ip: Option<IpAddr>,
     pub web_server_port: Option<u16>,
     pub web_server_capability: Option<bool>,
+    /// Public URL of the active remote relay tunnel, if any. Set when the user
+    /// has triggered "Share to Internet" and the relay tunnel has been
+    /// established; cleared when the tunnel is torn down.
+    pub remote_share_url: Option<String>,
 }
 
 impl ModeInfo {
@@ -3526,6 +3530,8 @@ pub enum PluginCommand {
     StopWebServer,
     ShareCurrentSession,
     StopSharingCurrentSession,
+    ShareCurrentSessionToRelay,
+    StopSharingCurrentSessionFromRelay,
     OpenFileInPlaceOfPlugin(FileToOpen, bool, Context), // bool -> close_plugin_after_replace
     GroupAndUngroupPanes(Vec<PaneId>, Vec<PaneId>, bool), // panes to group, panes to ungroup,
     // bool -> for all clients

@@ -36,6 +36,7 @@ url = { workspace = true }
 uuid = { workspace = true }
 include_dir = { workspace = true }
 zellij-utils = { workspace = true }
+zellij-relay-protocol = { workspace = true, optional = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 isahc = { workspace = true }
@@ -82,5 +83,6 @@ web_server_capability = [
     "dep:time",
     "dep:axum-server",
     "dep:tower-http",
+    "dep:zellij-relay-protocol",
     "zellij-utils/web_server_capability",
 ]

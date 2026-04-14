@@ -107,6 +107,14 @@ fn workspace_members() -> &'static Vec<WorkspaceMember> {
                 build: false,
             },
             WorkspaceMember {
+                crate_name: "zellij-relay-protocol",
+                build: false,
+            },
+            WorkspaceMember {
+                crate_name: "zellij-relay",
+                build: false,
+            },
+            WorkspaceMember {
                 crate_name: ".",
                 build: true,
             },

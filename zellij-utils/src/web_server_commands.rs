@@ -1,5 +1,6 @@
 use crate::consts::is_ipc_socket;
 use crate::consts::WEBSERVER_SOCKET_PATH;
+use crate::data::ClientId;
 use crate::errors::prelude::*;
 use crate::web_server_contract::web_server_contract::InstructionForWebServer as ProtoInstructionForWebServer;
 use crate::web_server_contract::web_server_contract::WebServerResponse as ProtoWebServerResponse;
@@ -45,6 +46,15 @@ pub fn shutdown_all_webserver_instances() -> Result<()> {
 pub enum InstructionForWebServer {
     ShutdownWebServer,
     QueryVersion,
+    StartRelayTunnel {
+        client_id: ClientId,
+        session_name: String,
+        relay_url: String,
+        zellij_version: String,
+    },
+    StopRelayTunnel {
+        client_id: ClientId,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -57,6 +67,19 @@ pub struct VersionInfo {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum WebServerResponse {
     Version(VersionInfo),
+    RelayTunnelEstablished {
+        client_id: ClientId,
+        public_url: String,
+        slug: String,
+        tunnel_id: String,
+    },
+    RelayTunnelStopped {
+        client_id: ClientId,
+    },
+    RelayTunnelError {
+        client_id: ClientId,
+        message: String,
+    },
 }
 
 pub fn create_webserver_sender(path: &str) -> Result<BufWriter<LocalSocketStream>> {

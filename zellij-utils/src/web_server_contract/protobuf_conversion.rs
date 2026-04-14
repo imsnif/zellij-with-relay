@@ -4,8 +4,10 @@ use crate::web_server_commands::{
 };
 use crate::web_server_contract::web_server_contract::{
     instruction_for_web_server, web_server_response,
-    InstructionForWebServer as ProtoInstructionForWebServer, QueryVersionMsg, ShutdownWebServerMsg,
-    VersionResponseMsg, WebServerResponse as ProtoWebServerResponse,
+    InstructionForWebServer as ProtoInstructionForWebServer, QueryVersionMsg,
+    RelayTunnelErrorMsg, RelayTunnelEstablishedMsg, RelayTunnelStoppedMsg, ShutdownWebServerMsg,
+    StartRelayTunnelMsg, StopRelayTunnelMsg, VersionResponseMsg,
+    WebServerResponse as ProtoWebServerResponse,
 };
 
 // Convert Rust InstructionForWebServer to protobuf
@@ -17,6 +19,22 @@ impl From<RustInstructionForWebServer> for ProtoInstructionForWebServer {
             },
             RustInstructionForWebServer::QueryVersion => {
                 instruction_for_web_server::Instruction::QueryVersion(QueryVersionMsg {})
+            },
+            RustInstructionForWebServer::StartRelayTunnel {
+                client_id,
+                session_name,
+                relay_url,
+                zellij_version,
+            } => instruction_for_web_server::Instruction::StartRelayTunnel(StartRelayTunnelMsg {
+                client_id: client_id as u32,
+                session_name,
+                relay_url,
+                zellij_version,
+            }),
+            RustInstructionForWebServer::StopRelayTunnel { client_id } => {
+                instruction_for_web_server::Instruction::StopRelayTunnel(StopRelayTunnelMsg {
+                    client_id: client_id as u32,
+                })
             },
         };
 
@@ -38,6 +56,19 @@ impl TryFrom<ProtoInstructionForWebServer> for RustInstructionForWebServer {
             Some(instruction_for_web_server::Instruction::QueryVersion(_)) => {
                 Ok(RustInstructionForWebServer::QueryVersion)
             },
+            Some(instruction_for_web_server::Instruction::StartRelayTunnel(msg)) => {
+                Ok(RustInstructionForWebServer::StartRelayTunnel {
+                    client_id: msg.client_id as u16,
+                    session_name: msg.session_name,
+                    relay_url: msg.relay_url,
+                    zellij_version: msg.zellij_version,
+                })
+            },
+            Some(instruction_for_web_server::Instruction::StopRelayTunnel(msg)) => {
+                Ok(RustInstructionForWebServer::StopRelayTunnel {
+                    client_id: msg.client_id as u16,
+                })
+            },
             None => Err(anyhow!("Missing instruction in InstructionForWebServer")),
         }
     }
@@ -52,6 +83,28 @@ impl From<WebServerResponse> for ProtoWebServerResponse {
                     version: version_info.version,
                     ip: version_info.ip,
                     port: version_info.port as u32,
+                })
+            },
+            WebServerResponse::RelayTunnelEstablished {
+                client_id,
+                public_url,
+                slug,
+                tunnel_id,
+            } => web_server_response::Response::RelayTunnelEstablished(RelayTunnelEstablishedMsg {
+                client_id: client_id as u32,
+                public_url,
+                slug,
+                tunnel_id,
+            }),
+            WebServerResponse::RelayTunnelStopped { client_id } => {
+                web_server_response::Response::RelayTunnelStopped(RelayTunnelStoppedMsg {
+                    client_id: client_id as u32,
+                })
+            },
+            WebServerResponse::RelayTunnelError { client_id, message } => {
+                web_server_response::Response::RelayTunnelError(RelayTunnelErrorMsg {
+                    client_id: client_id as u32,
+                    message,
                 })
             },
         };
@@ -75,7 +128,148 @@ impl TryFrom<ProtoWebServerResponse> for WebServerResponse {
                     port: version_msg.port as u16,
                 }))
             },
+            Some(web_server_response::Response::RelayTunnelEstablished(msg)) => {
+                Ok(WebServerResponse::RelayTunnelEstablished {
+                    client_id: msg.client_id as u16,
+                    public_url: msg.public_url,
+                    slug: msg.slug,
+                    tunnel_id: msg.tunnel_id,
+                })
+            },
+            Some(web_server_response::Response::RelayTunnelStopped(msg)) => {
+                Ok(WebServerResponse::RelayTunnelStopped {
+                    client_id: msg.client_id as u16,
+                })
+            },
+            Some(web_server_response::Response::RelayTunnelError(msg)) => {
+                Ok(WebServerResponse::RelayTunnelError {
+                    client_id: msg.client_id as u16,
+                    message: msg.message,
+                })
+            },
             None => Err(anyhow!("Missing response in WebServerResponse")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::web_server_commands::{InstructionForWebServer, WebServerResponse};
+
+    fn roundtrip_instruction(original: InstructionForWebServer) -> InstructionForWebServer {
+        let proto: ProtoInstructionForWebServer = original.into();
+        proto.try_into().expect("roundtrip ok")
+    }
+
+    fn roundtrip_response(original: WebServerResponse) -> WebServerResponse {
+        let proto: ProtoWebServerResponse = original.into();
+        proto.try_into().expect("roundtrip ok")
+    }
+
+    #[test]
+    fn start_relay_tunnel_roundtrip() {
+        let original = InstructionForWebServer::StartRelayTunnel {
+            client_id: 7,
+            session_name: "foo".into(),
+            relay_url: "ws://x".into(),
+            zellij_version: "0.45.0".into(),
+        };
+        let decoded = roundtrip_instruction(original.clone());
+        match (original, decoded) {
+            (
+                InstructionForWebServer::StartRelayTunnel {
+                    client_id: a1,
+                    session_name: a2,
+                    relay_url: a3,
+                    zellij_version: a4,
+                },
+                InstructionForWebServer::StartRelayTunnel {
+                    client_id: b1,
+                    session_name: b2,
+                    relay_url: b3,
+                    zellij_version: b4,
+                },
+            ) => {
+                assert_eq!(a1, b1);
+                assert_eq!(a2, b2);
+                assert_eq!(a3, b3);
+                assert_eq!(a4, b4);
+            },
+            (_, other) => panic!("expected StartRelayTunnel, got {:?}", other),
+        }
+
+        use crate::web_server_contract::web_server_contract::instruction_for_web_server::Instruction;
+        let proto: ProtoInstructionForWebServer = InstructionForWebServer::StartRelayTunnel {
+            client_id: 1,
+            session_name: "n".into(),
+            relay_url: "r".into(),
+            zellij_version: "v".into(),
+        }
+        .into();
+        assert!(matches!(
+            proto.instruction,
+            Some(Instruction::StartRelayTunnel(_))
+        ));
+    }
+
+    #[test]
+    fn stop_relay_tunnel_roundtrip() {
+        let original = InstructionForWebServer::StopRelayTunnel { client_id: 42 };
+        let decoded = roundtrip_instruction(original.clone());
+        match decoded {
+            InstructionForWebServer::StopRelayTunnel { client_id } => {
+                assert_eq!(client_id, 42);
+            },
+            other => panic!("expected StopRelayTunnel, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn relay_tunnel_established_response_roundtrip() {
+        let original = WebServerResponse::RelayTunnelEstablished {
+            client_id: 3,
+            public_url: "http://x/r/abc".into(),
+            slug: "abc".into(),
+            tunnel_id: "t-1".into(),
+        };
+        match roundtrip_response(original) {
+            WebServerResponse::RelayTunnelEstablished {
+                client_id,
+                public_url,
+                slug,
+                tunnel_id,
+            } => {
+                assert_eq!(client_id, 3);
+                assert_eq!(public_url, "http://x/r/abc");
+                assert_eq!(slug, "abc");
+                assert_eq!(tunnel_id, "t-1");
+            },
+            other => panic!("wrong variant: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn relay_tunnel_stopped_response_roundtrip() {
+        let original = WebServerResponse::RelayTunnelStopped { client_id: 9 };
+        match roundtrip_response(original) {
+            WebServerResponse::RelayTunnelStopped { client_id } => assert_eq!(client_id, 9),
+            other => panic!("wrong variant: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn relay_tunnel_error_response_roundtrip() {
+        let original = WebServerResponse::RelayTunnelError {
+            client_id: 11,
+            message: "nope".into(),
+        };
+        match roundtrip_response(original) {
+            WebServerResponse::RelayTunnelError { client_id, message } => {
+                assert_eq!(client_id, 11);
+                assert_eq!(message, "nope");
+            },
+            other => panic!("wrong variant: {:?}", other),
         }
     }
 }

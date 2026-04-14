@@ -2299,6 +2299,20 @@ impl TryFrom<ProtobufPluginCommand> for PluginCommand {
                     Ok(PluginCommand::StopSharingCurrentSession)
                 }
             },
+            Some(CommandName::ShareCurrentSessionToRelay) => {
+                if protobuf_plugin_command.payload.is_some() {
+                    Err("ShareCurrentSessionToRelay should not have a payload")
+                } else {
+                    Ok(PluginCommand::ShareCurrentSessionToRelay)
+                }
+            },
+            Some(CommandName::StopSharingCurrentSessionFromRelay) => {
+                if protobuf_plugin_command.payload.is_some() {
+                    Err("StopSharingCurrentSessionFromRelay should not have a payload")
+                } else {
+                    Ok(PluginCommand::StopSharingCurrentSessionFromRelay)
+                }
+            },
             Some(CommandName::SetSelfMouseSelectionSupport) => {
                 match protobuf_plugin_command.payload {
                     Some(Payload::SetSelfMouseSelectionSupportPayload(
@@ -4025,6 +4039,14 @@ impl TryFrom<PluginCommand> for ProtobufPluginCommand {
                 name: CommandName::StopSharingCurrentSession as i32,
                 payload: None,
             }),
+            PluginCommand::ShareCurrentSessionToRelay => Ok(ProtobufPluginCommand {
+                name: CommandName::ShareCurrentSessionToRelay as i32,
+                payload: None,
+            }),
+            PluginCommand::StopSharingCurrentSessionFromRelay => Ok(ProtobufPluginCommand {
+                name: CommandName::StopSharingCurrentSessionFromRelay as i32,
+                payload: None,
+            }),
             PluginCommand::SetSelfMouseSelectionSupport(support_mouse_selection) => {
                 Ok(ProtobufPluginCommand {
                     name: CommandName::SetSelfMouseSelectionSupport as i32,
@@ -5050,6 +5072,40 @@ impl From<OpenPluginPaneFloatingResponse> for ProtobufOpenPluginPaneFloatingResp
     fn from(response: OpenPluginPaneFloatingResponse) -> Self {
         ProtobufOpenPluginPaneFloatingResponse {
             pane_id: response.map(|p| p.try_into().unwrap()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn share_current_session_to_relay_roundtrip() {
+        let original = PluginCommand::ShareCurrentSessionToRelay;
+        let proto: ProtobufPluginCommand = original.clone().try_into().unwrap();
+        assert_eq!(proto.name, CommandName::ShareCurrentSessionToRelay as i32);
+        assert_eq!(proto.name, 211);
+        let decoded: PluginCommand = proto.try_into().unwrap();
+        match decoded {
+            PluginCommand::ShareCurrentSessionToRelay => {},
+            other => panic!("expected ShareCurrentSessionToRelay, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn stop_sharing_current_session_from_relay_roundtrip() {
+        let original = PluginCommand::StopSharingCurrentSessionFromRelay;
+        let proto: ProtobufPluginCommand = original.clone().try_into().unwrap();
+        assert_eq!(
+            proto.name,
+            CommandName::StopSharingCurrentSessionFromRelay as i32
+        );
+        assert_eq!(proto.name, 212);
+        let decoded: PluginCommand = proto.try_into().unwrap();
+        match decoded {
+            PluginCommand::StopSharingCurrentSessionFromRelay => {},
+            other => panic!("expected StopSharingCurrentSessionFromRelay, got {:?}", other),
         }
     }
 }

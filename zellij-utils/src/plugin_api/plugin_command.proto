@@ -207,6 +207,8 @@ enum CommandName {
   KillSessionsAndReply = 212;
   DeleteDeadSessionAndReply = 213;
   DeleteAllDeadSessionsAndReply = 214;
+  ShareCurrentSessionToRelay = 215;
+  StopSharingCurrentSessionFromRelay = 216;
 }
 
 message PluginCommand {
