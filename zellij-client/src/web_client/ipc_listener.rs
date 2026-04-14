@@ -83,6 +83,42 @@ pub async fn listen_to_web_server_instructions(
                         });
                         let _ = send_webserver_response(&mut receiver, response).await;
                     },
+                    InstructionForWebServer::StartRelayTunnel {
+                        client_id,
+                        session_name,
+                        relay_url,
+                        zellij_version,
+                    } => {
+                        let response = match crate::web_client::relay::start_relay_tunnel(
+                            client_id,
+                            relay_url,
+                            session_name,
+                            zellij_version,
+                        )
+                        .await
+                        {
+                            Ok(public_url) => WebServerResponse::RelayTunnelEstablished {
+                                client_id,
+                                public_url,
+                                slug: String::new(),
+                                tunnel_id: String::new(),
+                            },
+                            Err(e) => {
+                                log::error!("Relay tunnel establish failed: {}", e);
+                                WebServerResponse::RelayTunnelError {
+                                    client_id,
+                                    message: e.to_string(),
+                                }
+                            },
+                        };
+                        let _ = send_webserver_response(&mut receiver, response).await;
+                    },
+                    InstructionForWebServer::StopRelayTunnel { client_id } => {
+                        let _ =
+                            crate::web_client::relay::stop_relay_tunnel(client_id).await;
+                        let response = WebServerResponse::RelayTunnelStopped { client_id };
+                        let _ = send_webserver_response(&mut receiver, response).await;
+                    },
                 },
                 Err(e) => {
                     log::error!("Failed to process web server instruction: {}", e);

@@ -131,6 +131,11 @@ impl App {
             should_render = true;
         }
 
+        if self.web_server.remote_share_url != mode_info.remote_share_url {
+            self.web_server.remote_share_url = mode_info.remote_share_url;
+            should_render = true;
+        }
+
         should_render
     }
 
@@ -181,6 +186,14 @@ impl App {
             },
             BareKey::Char(' ') if key.has_no_modifiers() => {
                 self.toggle_session_sharing();
+                false
+            },
+            BareKey::Char('i') if key.has_no_modifiers() => {
+                share_current_session_to_relay();
+                false
+            },
+            BareKey::Char('I') if key.has_no_modifiers() => {
+                stop_sharing_current_session_from_relay();
                 false
             },
             BareKey::Char('t') if key.has_no_modifiers() => {
@@ -441,6 +454,7 @@ impl App {
             self.ui.hover_coordinates,
             &self.state.info,
             &self.ui.link_executable,
+            &self.web_server.remote_share_url,
         )
         .render(rows, cols);
 
@@ -495,6 +509,7 @@ struct WebServerState {
     port: Option<u16>,
     base_url: String,
     capability: bool,
+    pub remote_share_url: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -682,3 +697,4 @@ impl CoordinatesInLine {
         x >= self.x && x <= self.x + self.width && self.y == y
     }
 }
+

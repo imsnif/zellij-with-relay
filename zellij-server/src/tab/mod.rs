@@ -204,6 +204,7 @@ pub(crate) struct Tab {
     explicitly_disable_kitty_keyboard_protocol: bool,
     web_clients_allowed: bool,
     web_sharing: WebSharing,
+    remote_share_url: Option<String>,
     mouse_hover_pane_id: HashMap<ClientId, PaneId>,
     mouse_help_text_visible: HashMap<ClientId, bool>,
     last_mouse_activity_time: HashMap<ClientId, Instant>,
@@ -835,6 +836,7 @@ impl Tab {
             default_editor,
             web_clients_allowed,
             web_sharing,
+            remote_share_url: None,
             mouse_hover_pane_id: HashMap::new(),
             mouse_help_text_visible: HashMap::new(),
             last_mouse_activity_time: HashMap::new(),
@@ -1184,6 +1186,7 @@ impl Tab {
             mode_info.editor = self.default_editor.clone();
             mode_info.web_clients_allowed = Some(self.web_clients_allowed);
             mode_info.web_sharing = Some(self.web_sharing);
+            mode_info.remote_share_url = self.remote_share_url.clone();
             mode_info.currently_marking_pane_group =
                 currently_marking_pane_group.get(client_id).copied();
             mode_info.web_server_ip = Some(self.web_server_ip);
@@ -5624,6 +5627,10 @@ impl Tab {
         if old_value != self.web_sharing {
             let _ = self.update_input_modes();
         }
+    }
+    pub fn update_remote_share_url(&mut self, url: Option<String>) {
+        self.remote_share_url = url;
+        let _ = self.update_input_modes();
     }
     pub fn extract_suppressed_panes(&mut self) -> SuppressedPanes {
         self.suppressed_panes.drain().collect()

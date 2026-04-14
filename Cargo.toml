@@ -63,6 +63,8 @@ members = [
     "zellij-utils",
     "zellij-tile",
     "zellij-tile-utils",
+    "zellij-relay-protocol",
+    "zellij-relay",
     "xtask",
     ".",
 ]
@@ -116,6 +118,7 @@ names = { version = "0.14.0", default-features = false }
 include_dir = { version = "0.7.3", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 zellij-utils = { path = "zellij-utils/", version = "0.45.0" }
+zellij-relay-protocol = { path = "zellij-relay-protocol/", version = "0.45.0" }
 
 [profile.dev-opt]
 inherits = "dev"

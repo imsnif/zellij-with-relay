@@ -266,6 +266,13 @@ pub struct Options {
     pub web_server_cert: Option<PathBuf>,
     pub web_server_key: Option<PathBuf>,
     pub enforce_https_for_localhost: Option<bool>,
+    /// WebSocket URL of the Zellij relay that "Share to Internet" tunnels to
+    /// (e.g. `ws://localhost:8765` for local development, or
+    /// `wss://relay.zellij.dev` in production). When `None`, the relay
+    /// tunnel feature is disabled.
+    #[clap(long, value_parser)]
+    #[serde(default)]
+    pub relay_server_url: Option<String>,
     /// A command to run after the discovery of running commands when serializing, for the purpose
     /// of manipulating the command (eg. with a regex) before it gets serialized
     #[clap(long, value_parser)]
@@ -378,6 +385,9 @@ impl Options {
         let enforce_https_for_localhost = other
             .enforce_https_for_localhost
             .or(self.enforce_https_for_localhost);
+        let relay_server_url = other
+            .relay_server_url
+            .or_else(|| self.relay_server_url.clone());
         let post_command_discovery_hook = other
             .post_command_discovery_hook
             .or(self.post_command_discovery_hook.clone());
@@ -411,6 +421,7 @@ impl Options {
             auto_layout,
             session_serialization,
             serialize_pane_viewport,
+            relay_server_url,
             scrollback_lines_to_serialize,
             styled_underlines,
             serialization_interval,
@@ -513,6 +524,9 @@ impl Options {
         let enforce_https_for_localhost = other
             .enforce_https_for_localhost
             .or(self.enforce_https_for_localhost);
+        let relay_server_url = other
+            .relay_server_url
+            .or_else(|| self.relay_server_url.clone());
         let post_command_discovery_hook = other
             .post_command_discovery_hook
             .or_else(|| self.post_command_discovery_hook.clone());
@@ -566,6 +580,7 @@ impl Options {
             web_server_cert,
             web_server_key,
             enforce_https_for_localhost,
+            relay_server_url,
             post_command_discovery_hook,
             client_async_worker_tasks,
         }
@@ -577,5 +592,38 @@ impl Options {
         } else {
             self.to_owned()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relay_server_url_cli_overrides_kdl() {
+        let base = Options {
+            relay_server_url: Some("ws://kdl".into()),
+            ..Default::default()
+        };
+        let cli = Options {
+            relay_server_url: Some("ws://cli".into()),
+            ..Default::default()
+        };
+        let merged = base.merge_from_cli(cli);
+        assert_eq!(merged.relay_server_url, Some("ws://cli".into()));
+    }
+
+    #[test]
+    fn relay_server_url_cli_none_preserves_kdl() {
+        let base = Options {
+            relay_server_url: Some("ws://kdl".into()),
+            ..Default::default()
+        };
+        let cli = Options {
+            relay_server_url: None,
+            ..Default::default()
+        };
+        let merged = base.merge_from_cli(cli);
+        assert_eq!(merged.relay_server_url, Some("ws://kdl".into()));
     }
 }

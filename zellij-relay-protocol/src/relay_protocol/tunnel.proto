@@ -1,0 +1,49 @@
+syntax = "proto3";
+package zellij.relay.v1;
+
+// Tunnel handshake: sent by the Zellij instance as the first message on the
+// control WebSocket.
+message TunnelAuth {
+  string token = 1;            // placeholder during Phase 1 (future: real token)
+  string session_name = 2;
+  uint32 protocol_version = 3;
+  string zellij_version = 4;
+}
+
+// Relay response to a successful TunnelAuth.
+message TunnelEstablished {
+  string public_url = 1;
+  string slug = 2;
+  string tunnel_id = 3;
+}
+
+// Error surface on either the control or the terminal tunnel.
+message TunnelError {
+  string message = 1;
+}
+
+// Terminal tunnel linking message sent by the Zellij instance once the
+// terminal WebSocket is opened for a previously-established tunnel.
+message TunnelReady {
+  string tunnel_id = 1;
+}
+
+// Envelope for all control-tunnel messages. All Phase 1 messages that travel
+// on the control tunnel are wrapped in this oneof so that Phase 2+ can add
+// variants (AuthChallenge, ClientConnected, ControlFrame, ...) without
+// migrating the wire format.
+message ControlFrame {
+  oneof payload {
+    TunnelAuth auth = 1;
+    TunnelEstablished established = 2;
+    TunnelError error = 3;
+  }
+}
+
+// Envelope for all terminal-tunnel messages.
+message TerminalFrame {
+  oneof payload {
+    TunnelReady ready = 1;
+    TunnelError error = 2;
+  }
+}

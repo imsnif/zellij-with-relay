@@ -1949,6 +1949,7 @@ pub struct Options {
     pub theme_dark: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag="47")]
     pub theme_light: ::core::option::Option<::prost::alloc::string::String>,
+    pub relay_server_url: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// Pane-targeting action messages
 #[allow(clippy::derive_partial_eq_without_eq)]

@@ -661,6 +661,8 @@ pub struct ModeUpdatePayload {
     pub web_server_port: ::core::option::Option<u32>,
     #[prost(bool, optional, tag="15")]
     pub web_server_capability: ::core::option::Option<bool>,
+    #[prost(string, optional, tag="16")]
+    pub remote_share_url: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

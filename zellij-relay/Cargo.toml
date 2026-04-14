@@ -1,0 +1,29 @@
+[package]
+name = "zellij-relay"
+version.workspace = true
+authors = ["Aram Drevekenin <aram@poor.dev>"]
+edition.workspace = true
+description = "Relay server for Zellij remote session sharing"
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { version = "0.8.4", features = ["ws"] }
+futures-util = "0.3"
+log = { workspace = true }
+prost = { workspace = true }
+rand = "0.8"
+serde = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { workspace = true }
+zellij-relay-protocol = { workspace = true }
+
+[dev-dependencies]
+serial_test = "3.0"
+tokio-tungstenite = "0.20"
+
+[[bin]]
+name = "zellij-relay"
+path = "src/main.rs"

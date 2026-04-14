@@ -472,6 +472,7 @@ fn test_client_messages() {
                 web_server_cert: Some(PathBuf::from("web_server_cert")),
                 web_server_key: Some(PathBuf::from("web_server_key")),
                 enforce_https_for_localhost: Some(true),
+                relay_server_url: Some("ws://localhost:8765".to_owned()),
                 post_command_discovery_hook: Some("post_command_discovery_hook".to_owned()),
                 client_async_worker_tasks: Some(16),
                 mouse_hover_effects: Some(false),

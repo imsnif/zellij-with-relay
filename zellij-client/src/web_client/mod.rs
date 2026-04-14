@@ -5,6 +5,7 @@ mod connection_manager;
 mod http_handlers;
 mod ipc_listener;
 mod message_handlers;
+mod relay;
 mod server_listener;
 mod session_management;
 mod types;
@@ -457,3 +458,7 @@ fn daemonize_web_server(
 #[cfg(test)]
 #[path = "./unit/web_client_tests.rs"]
 mod web_client_tests;
+
+#[cfg(test)]
+#[path = "./unit/relay_tests.rs"]
+mod relay_tests;

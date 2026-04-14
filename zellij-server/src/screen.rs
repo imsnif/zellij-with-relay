@@ -792,6 +792,7 @@ pub enum ScreenInstruction {
     TogglePaneInGroup(ClientId, Option<NotificationEnd>),
     ToggleGroupMarking(ClientId, Option<NotificationEnd>),
     SessionSharingStatusChange(bool),
+    RemoteShareUrlChange(Option<String>),
     SetMouseSelectionSupport(PaneId, bool),
     InterceptKeyPresses(PluginId, ClientId),
     ClearKeyPressesIntercepts(ClientId),
@@ -1113,6 +1114,7 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::SessionSharingStatusChange(..) => {
                 ScreenContext::SessionSharingStatusChange
             },
+            ScreenInstruction::RemoteShareUrlChange(..) => ScreenContext::RemoteShareUrlChange,
             ScreenInstruction::SetMouseSelectionSupport(..) => {
                 ScreenContext::SetMouseSelectionSupport
             },
@@ -1385,6 +1387,7 @@ pub(crate) struct Screen {
     default_editor: Option<PathBuf>,
     web_clients_allowed: bool,
     web_sharing: WebSharing,
+    remote_share_url: Option<String>,
     current_pane_group: Rc<RefCell<PaneGroups>>,
     advanced_mouse_actions: bool,
     mouse_hover_effects: bool,
@@ -1569,6 +1572,7 @@ impl Screen {
             default_editor,
             web_clients_allowed,
             web_sharing,
+            remote_share_url: None,
             current_pane_group: Rc::new(RefCell::new(current_pane_group)),
             currently_marking_pane_group: Rc::new(RefCell::new(HashMap::new())),
             advanced_mouse_actions,
@@ -9049,6 +9053,14 @@ pub(crate) fn screen_thread_main(
 
                 for tab in screen.tabs.values_mut() {
                     tab.update_web_sharing(screen.web_sharing);
+                }
+                let _ = screen.log_and_report_session_state();
+                let _ = screen.render(None);
+            },
+            ScreenInstruction::RemoteShareUrlChange(url) => {
+                screen.remote_share_url = url.clone();
+                for tab in screen.tabs.values_mut() {
+                    tab.update_remote_share_url(url.clone());
                 }
                 let _ = screen.log_and_report_session_state();
                 let _ = screen.render(None);

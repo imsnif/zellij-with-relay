@@ -2513,6 +2513,20 @@ pub fn stop_sharing_current_session() {
     unsafe { host_run_plugin_command() };
 }
 
+pub fn share_current_session_to_relay() {
+    let plugin_command = PluginCommand::ShareCurrentSessionToRelay;
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
+pub fn stop_sharing_current_session_from_relay() {
+    let plugin_command = PluginCommand::StopSharingCurrentSessionFromRelay;
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
 pub fn group_and_ungroup_panes(
     pane_ids_to_group: Vec<PaneId>,
     pane_ids_to_ungroup: Vec<PaneId>,

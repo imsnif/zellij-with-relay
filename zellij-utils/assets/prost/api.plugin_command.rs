@@ -2124,6 +2124,8 @@ pub enum CommandName {
     OpenPluginPaneFloating = 209,
     ListWindowsVolumes = 210,
     GetSessionList = 211,
+    ShareCurrentSessionToRelay = 212,
+    StopSharingCurrentSessionFromRelay = 213,
 }
 impl CommandName {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -2323,6 +2325,8 @@ impl CommandName {
             CommandName::OpenPluginPaneFloating => "OpenPluginPaneFloating",
             CommandName::ListWindowsVolumes => "ListWindowsVolumes",
             CommandName::GetSessionList => "GetSessionList",
+            CommandName::ShareCurrentSessionToRelay => "ShareCurrentSessionToRelay",
+            CommandName::StopSharingCurrentSessionFromRelay => "StopSharingCurrentSessionFromRelay",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -2519,6 +2523,8 @@ impl CommandName {
             "OpenPluginPaneFloating" => Some(Self::OpenPluginPaneFloating),
             "ListWindowsVolumes" => Some(Self::ListWindowsVolumes),
             "GetSessionList" => Some(Self::GetSessionList),
+            "ShareCurrentSessionToRelay" => Some(Self::ShareCurrentSessionToRelay),
+            "StopSharingCurrentSessionFromRelay" => Some(Self::StopSharingCurrentSessionFromRelay),
             _ => None,
         }
     }

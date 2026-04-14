@@ -204,6 +204,8 @@ enum CommandName {
   OpenPluginPaneFloating = 209;
   ListWindowsVolumes = 210;
   GetSessionList = 211;
+  ShareCurrentSessionToRelay = 212;
+  StopSharingCurrentSessionFromRelay = 213;
 }
 
 message PluginCommand {

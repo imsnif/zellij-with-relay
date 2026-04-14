@@ -74,6 +74,11 @@ use zellij_utils::{
     ipc::{ClientAttributes, ExitReason, ServerToClientMsg},
     shared::{default_palette, web_server_base_url},
 };
+#[cfg(feature = "web_server_capability")]
+use zellij_utils::web_server_commands::{
+    discover_webserver_sockets, query_webserver_with_response,
+    InstructionForWebServer as WebServerInstruction, WebServerResponse,
+};
 
 pub type ClientId = u16;
 
@@ -129,6 +134,12 @@ pub enum ServerInstruction {
     StartWebServer(ClientId),
     ShareCurrentSession(ClientId),
     StopSharingCurrentSession(ClientId),
+    ShareCurrentSessionToRelay(ClientId),
+    StopSharingCurrentSessionFromRelay(ClientId),
+    RelayTunnelReady {
+        client_id: ClientId,
+        public_url: Option<String>,
+    },
     SendWebClientsForbidden(ClientId),
     WebServerStarted(String), // String -> base_url
     FailedToStartWebServer(String),
@@ -178,6 +189,13 @@ impl From<&ServerInstruction> for ServerContext {
             ServerInstruction::StopSharingCurrentSession(..) => {
                 ServerContext::StopSharingCurrentSession
             },
+            ServerInstruction::ShareCurrentSessionToRelay(..) => {
+                ServerContext::ShareCurrentSessionToRelay
+            },
+            ServerInstruction::StopSharingCurrentSessionFromRelay(..) => {
+                ServerContext::StopSharingCurrentSessionFromRelay
+            },
+            ServerInstruction::RelayTunnelReady { .. } => ServerContext::RelayTunnelReady,
             ServerInstruction::WebServerStarted(..) => ServerContext::WebServerStarted,
             ServerInstruction::FailedToStartWebServer(..) => ServerContext::FailedToStartWebServer,
             ServerInstruction::ConfigWrittenToDisk(..) => ServerContext::ConfigWrittenToDisk,
@@ -1863,6 +1881,151 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                     // TODO: test this
                     log::error!("Cannot start web server: this instance of Zellij was compiled without web_server_capability");
                 }
+            },
+            ServerInstruction::ShareCurrentSessionToRelay(client_id) => {
+                #[cfg(feature = "web_server_capability")]
+                {
+                    let is_sharing = session_data
+                        .read()
+                        .ok()
+                        .and_then(|s| s.as_ref().map(|s| s.web_sharing.is_on()))
+                        .unwrap_or(false);
+                    if !is_sharing {
+                        log::error!("Cannot start relay tunnel: web sharing is not enabled");
+                    } else {
+                        let relay_url = session_data
+                            .read()
+                            .ok()
+                            .and_then(|s| {
+                                s.as_ref().and_then(|s| {
+                                    s.session_configuration
+                                        .get_client_configuration(&client_id)
+                                        .options
+                                        .relay_server_url
+                                })
+                            });
+                        match relay_url {
+                            None => {
+                                log::error!(
+                                    "Cannot start relay tunnel: relay_server_url not configured"
+                                );
+                            },
+                            Some(relay_url) => {
+                                let session_name = envs::get_session_name().unwrap_or_default();
+                                let zellij_version = zellij_utils::consts::VERSION.to_string();
+                                let to_server = to_server.clone();
+                                thread::spawn(move || {
+                                    let sockets: Vec<std::path::PathBuf> =
+                                        match discover_webserver_sockets() {
+                                            Ok(s) if !s.is_empty() => s,
+                                            _ => {
+                                                log::error!(
+                                                    "Relay tunnel: no web server socket found"
+                                                );
+                                                let _ = to_server.send(
+                                                    ServerInstruction::RelayTunnelReady {
+                                                        client_id,
+                                                        public_url: None,
+                                                    },
+                                                );
+                                                return;
+                                            },
+                                        };
+                                    let path_str =
+                                        sockets[0].to_str().unwrap_or("").to_string();
+                                    let instruction =
+                                        WebServerInstruction::StartRelayTunnel {
+                                            client_id,
+                                            session_name,
+                                            relay_url,
+                                            zellij_version,
+                                        };
+                                    let result = query_webserver_with_response(
+                                        &path_str,
+                                        instruction,
+                                        10_000,
+                                    );
+                                    let public_url = match result {
+                                        Ok(WebServerResponse::RelayTunnelEstablished {
+                                            public_url,
+                                            ..
+                                        }) => Some(public_url),
+                                        Ok(WebServerResponse::RelayTunnelError {
+                                            message,
+                                            ..
+                                        }) => {
+                                            log::error!("Relay tunnel error: {}", message);
+                                            None
+                                        },
+                                        Err(e) => {
+                                            log::error!("Relay tunnel IPC error: {}", e);
+                                            None
+                                        },
+                                        _ => None,
+                                    };
+                                    let _ = to_server.send(
+                                        ServerInstruction::RelayTunnelReady {
+                                            client_id,
+                                            public_url,
+                                        },
+                                    );
+                                });
+                            },
+                        }
+                    }
+                }
+                #[cfg(not(feature = "web_server_capability"))]
+                {
+                    let _ = client_id;
+                    log::error!(
+                        "Cannot start relay tunnel: compiled without web_server_capability"
+                    );
+                }
+            },
+            ServerInstruction::StopSharingCurrentSessionFromRelay(client_id) => {
+                #[cfg(feature = "web_server_capability")]
+                {
+                    let to_server = to_server.clone();
+                    thread::spawn(move || {
+                        let sockets: Vec<std::path::PathBuf> =
+                            match discover_webserver_sockets() {
+                                Ok(s) if !s.is_empty() => s,
+                                _ => {
+                                    log::warn!("StopRelayTunnel: no web server socket found");
+                                    let _ = to_server
+                                        .send(ServerInstruction::RelayTunnelReady {
+                                            client_id,
+                                            public_url: None,
+                                        });
+                                    return;
+                                },
+                            };
+                        let path_str = sockets[0].to_str().unwrap_or("").to_string();
+                        let instruction = WebServerInstruction::StopRelayTunnel { client_id };
+                        let _ = query_webserver_with_response(&path_str, instruction, 5_000);
+                        let _ = to_server.send(ServerInstruction::RelayTunnelReady {
+                            client_id,
+                            public_url: None,
+                        });
+                    });
+                }
+                #[cfg(not(feature = "web_server_capability"))]
+                {
+                    let _ = client_id;
+                    log::error!(
+                        "Cannot stop relay tunnel: compiled without web_server_capability"
+                    );
+                }
+            },
+            ServerInstruction::RelayTunnelReady { client_id: _, public_url } => {
+                session_data
+                    .write()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .senders
+                    .send_to_screen(ScreenInstruction::RemoteShareUrlChange(public_url))
+                    .unwrap();
             },
             ServerInstruction::WebServerStarted(base_url) => {
                 session_data

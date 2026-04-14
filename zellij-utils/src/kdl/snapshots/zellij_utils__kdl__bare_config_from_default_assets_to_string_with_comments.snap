@@ -523,6 +523,11 @@ web_client {
 /// Default: false
 // 
 // enforce_https_for_localhost false
+/// WebSocket URL of the Zellij relay used by 'Share to Internet'.
+/// Example: "ws://localhost:8765" for a locally-run `zellij-relay`,
+/// or "wss://relay.zellij.dev" for the public relay.
+// 
+// relay_server_url "ws://localhost:8765"
  
 // Whether to stack panes when resizing beyond a certain size
 // Default: true

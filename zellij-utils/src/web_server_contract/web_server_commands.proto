@@ -5,9 +5,8 @@ message InstructionForWebServer {
   oneof instruction {
     ShutdownWebServerMsg shutdown_web_server = 1;
     QueryVersionMsg query_version = 2;
-    // Future commands can be added here
-    // RestartWebServerMsg restart_web_server = 3;
-    // ReloadConfigMsg reload_config = 4;
+    StartRelayTunnelMsg start_relay_tunnel = 3;
+    StopRelayTunnelMsg stop_relay_tunnel = 4;
   }
 }
 
@@ -17,9 +16,23 @@ message ShutdownWebServerMsg {
 
 message QueryVersionMsg {}
 
+message StartRelayTunnelMsg {
+  uint32 client_id = 1;
+  string session_name = 2;
+  string relay_url = 3;
+  string zellij_version = 4;
+}
+
+message StopRelayTunnelMsg {
+  uint32 client_id = 1;
+}
+
 message WebServerResponse {
   oneof response {
     VersionResponseMsg version = 1;
+    RelayTunnelEstablishedMsg relay_tunnel_established = 2;
+    RelayTunnelStoppedMsg relay_tunnel_stopped = 3;
+    RelayTunnelErrorMsg relay_tunnel_error = 4;
   }
 }
 
@@ -27,4 +40,20 @@ message VersionResponseMsg {
   string version = 1;
   string ip = 2;
   uint32 port = 3;
+}
+
+message RelayTunnelEstablishedMsg {
+  uint32 client_id = 1;
+  string public_url = 2;
+  string slug = 3;
+  string tunnel_id = 4;
+}
+
+message RelayTunnelStoppedMsg {
+  uint32 client_id = 1;
+}
+
+message RelayTunnelErrorMsg {
+  uint32 client_id = 1;
+  string message = 2;
 }
