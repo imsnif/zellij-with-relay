@@ -387,3 +387,60 @@ pub fn validate_token(token: &str) -> Result<bool> {
     )?;
     Ok(count > 0)
 }
+
+/// Validate a pre-hashed auth token, returning the stored read-only flag if the
+/// hash matches a known auth token. Used by the relay tunnel path, which only
+/// ever receives the hash on the wire and cannot re-derive the raw token.
+pub fn validate_auth_token_hash(hash: &str) -> Result<Option<bool>> {
+    let conn = open_db()?;
+
+    match conn.query_row(
+        "SELECT read_only FROM tokens WHERE token_hash = ?1",
+        [&hash],
+        |row| row.get::<_, i64>(0),
+    ) {
+        Ok(read_only) => Ok(Some(read_only != 0)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(TokenError::Database(e)),
+    }
+}
+
+#[cfg(test)]
+mod validate_auth_token_hash_tests {
+    use super::*;
+    use serial_test::serial;
+
+    fn reset_db() {
+        let _ = delete_db();
+    }
+
+    #[test]
+    #[serial]
+    fn miss_returns_none() {
+        reset_db();
+        // Open DB to ensure schema is initialised.
+        let _ = open_db().unwrap();
+        let result = validate_auth_token_hash("deadbeef").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn hit_returns_read_only_flag_for_rw_token() {
+        reset_db();
+        let (raw, _name) = create_token(Some("rw_test".into()), false).unwrap();
+        let hash = hash_token(&raw);
+        let result = validate_auth_token_hash(&hash).unwrap();
+        assert_eq!(result, Some(false));
+    }
+
+    #[test]
+    #[serial]
+    fn hit_returns_read_only_flag_for_ro_token() {
+        reset_db();
+        let (raw, _name) = create_token(Some("ro_test".into()), true).unwrap();
+        let hash = hash_token(&raw);
+        let result = validate_auth_token_hash(&hash).unwrap();
+        assert_eq!(result, Some(true));
+    }
+}

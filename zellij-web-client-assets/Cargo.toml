@@ -1,0 +1,11 @@
+[package]
+name = "zellij-web-client-assets"
+version.workspace = true
+authors = ["Aram Drevekenin <aram@poor.dev>"]
+edition.workspace = true
+description = "Bundled web client assets for Zellij local web server and relay"
+license.workspace = true
+include = ["src/**/*", "assets/**/*"]
+
+[dependencies]
+include_dir = { workspace = true }

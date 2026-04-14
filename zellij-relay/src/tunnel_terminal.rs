@@ -2,9 +2,13 @@
 //!
 //! The Zellij instance connects here after receiving `TunnelEstablished`,
 //! passing the slug as a `?slug=...` query parameter, and sends a
-//! `TerminalMessage::Ready { tunnel_id }` as its first frame. The relay
-//! verifies the slug matches, then holds the socket open. Phase 1 has no
-//! actual payload forwarding yet.
+//! `TerminalMessage::Ready { tunnel_id }` as its first frame. After the
+//! handshake the socket is split:
+//!
+//! - Writer task drains `entry.terminal_tx` → encoded `TerminalMessage`
+//!   bytes pushed into the sink.
+//! - Reader task dispatches `TerminalFrameData { client_id, data }` to the
+//!   matching viewer's terminal sink as `Message::Binary`.
 
 use std::collections::HashMap;
 
@@ -15,7 +19,8 @@ use axum::{
     },
     response::Response,
 };
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
+use tokio::sync::mpsc;
 use zellij_relay_protocol::{decode_terminal_frame, TerminalMessage};
 
 use crate::router::AppState;
@@ -81,15 +86,85 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, slug: String) {
         },
     }
 
-    // Hold the socket open until EOF.
-    while let Some(frame) = socket.next().await {
-        match frame {
-            Ok(Message::Close(_)) | Err(_) => break,
-            Ok(_) => {
-                // Phase 1 has no defined terminal-tunnel traffic beyond Ready.
+    let (terminal_tx, mut terminal_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    *entry.terminal_tx.lock().unwrap() = Some(terminal_tx);
+
+    let (mut sink, mut stream) = socket.split();
+
+    // Writer task: drain encoded TerminalMessage bytes onto the sink.
+    let writer_slug = entry.slug.clone();
+    let writer_handle = tokio::spawn(async move {
+        while let Some(bytes) = terminal_rx.recv().await {
+            if let Err(e) = sink.send(Message::Binary(bytes.into())).await {
+                tracing::debug!(slug = %writer_slug, error = %e, "terminal writer error");
+                break;
+            }
+        }
+        let _ = sink.send(Message::Close(None)).await;
+    });
+
+    // Reader task body runs inline.
+    while let Some(frame) = stream.next().await {
+        let bytes = match frame {
+            Ok(Message::Binary(b)) => b,
+            Ok(Message::Text(t)) => t.as_bytes().to_vec().into(),
+            Ok(Message::Close(_)) => break,
+            Ok(_) => continue,
+            Err(e) => {
+                tracing::debug!(slug = %entry.slug, error = %e, "terminal reader error");
+                break;
+            },
+        };
+
+        let msg = match decode_terminal_frame(&bytes) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(slug = %entry.slug, error = %e, "bad terminal frame");
+                continue;
+            },
+        };
+
+        match msg {
+            TerminalMessage::TerminalFrameData { client_id, data } => {
+                let sender = entry
+                    .viewers
+                    .lock()
+                    .unwrap()
+                    .get(&client_id)
+                    .and_then(|v| v.terminal_sink_tx.clone());
+                match sender {
+                    Some(tx) => {
+                        // Match the local web flow: Zellij renders ANSI as
+                        // UTF-8 and sends Message::Text; xterm.js term.write()
+                        // expects a string (Blob frames are silently dropped
+                        // with the default binaryType).
+                        let msg = match String::from_utf8(data) {
+                            Ok(s) => Message::Text(s.into()),
+                            Err(e) => Message::Binary(e.into_bytes().into()),
+                        };
+                        let _ = tx.send(msg);
+                    },
+                    None => {
+                        tracing::debug!(
+                            slug = %entry.slug,
+                            client_id,
+                            "TerminalFrameData for unknown client_id, dropping"
+                        );
+                    },
+                }
+            },
+            TerminalMessage::Error { message } => {
+                tracing::warn!(slug = %entry.slug, %message, "relay-peer terminal error");
+            },
+            other => {
+                tracing::warn!(slug = %entry.slug, ?other, "unexpected terminal frame after handshake");
             },
         }
     }
+
+    // Clear the terminal_tx so writers can't enqueue to a closed channel.
+    *entry.terminal_tx.lock().unwrap() = None;
+    writer_handle.abort();
     tracing::info!(slug = %entry.slug, "terminal tunnel closed");
 }
 

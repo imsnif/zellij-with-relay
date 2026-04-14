@@ -152,3 +152,95 @@ fn control_frame_tolerates_unknown_trailing_bytes() {
 fn protocol_version_is_one() {
     assert_eq!(PROTOCOL_VERSION, 1);
 }
+
+#[test]
+fn auth_challenge_roundtrip() {
+    let original = ControlMessage::AuthChallenge {
+        request_id: vec![1, 2, 3, 4],
+        token_hash: "abc".into(),
+    };
+    let decoded = decode_control_frame(&original.encode()).unwrap();
+    match decoded {
+        ControlMessage::AuthChallenge {
+            request_id,
+            token_hash,
+        } => {
+            assert_eq!(request_id, vec![1, 2, 3, 4]);
+            assert_eq!(token_hash, "abc");
+        },
+        other => panic!("expected AuthChallenge, got {:?}", other),
+    }
+}
+
+#[test]
+fn auth_response_roundtrip() {
+    let original = ControlMessage::AuthResponse {
+        request_id: vec![9, 9],
+        client_id: 42,
+        accepted: true,
+        is_read_only: true,
+        session_token_hash: "hash".into(),
+    };
+    let decoded = decode_control_frame(&original.encode()).unwrap();
+    match decoded {
+        ControlMessage::AuthResponse {
+            request_id,
+            client_id,
+            accepted,
+            is_read_only,
+            session_token_hash,
+        } => {
+            assert_eq!(request_id, vec![9, 9]);
+            assert_eq!(client_id, 42);
+            assert!(accepted);
+            assert!(is_read_only);
+            assert_eq!(session_token_hash, "hash");
+        },
+        other => panic!("expected AuthResponse, got {:?}", other),
+    }
+}
+
+#[test]
+fn client_connected_and_disconnected_roundtrip() {
+    let a = ControlMessage::ClientConnected { client_id: 7 };
+    match decode_control_frame(&a.encode()).unwrap() {
+        ControlMessage::ClientConnected { client_id } => assert_eq!(client_id, 7),
+        other => panic!("expected ClientConnected, got {:?}", other),
+    }
+
+    let b = ControlMessage::ClientDisconnected { client_id: 7 };
+    match decode_control_frame(&b.encode()).unwrap() {
+        ControlMessage::ClientDisconnected { client_id } => assert_eq!(client_id, 7),
+        other => panic!("expected ClientDisconnected, got {:?}", other),
+    }
+}
+
+#[test]
+fn control_frame_data_roundtrip() {
+    let original = ControlMessage::ControlFrameData {
+        client_id: 3,
+        data: b"hello".to_vec(),
+    };
+    match decode_control_frame(&original.encode()).unwrap() {
+        ControlMessage::ControlFrameData { client_id, data } => {
+            assert_eq!(client_id, 3);
+            assert_eq!(data, b"hello");
+        },
+        other => panic!("expected ControlFrameData, got {:?}", other),
+    }
+}
+
+#[test]
+fn terminal_frame_data_roundtrip() {
+    let original = TerminalMessage::TerminalFrameData {
+        client_id: 11,
+        data: vec![0xde, 0xad, 0xbe, 0xef],
+    };
+    match decode_terminal_frame(&original.encode()).unwrap() {
+        TerminalMessage::TerminalFrameData { client_id, data } => {
+            assert_eq!(client_id, 11);
+            assert_eq!(data, vec![0xde, 0xad, 0xbe, 0xef]);
+        },
+        other => panic!("expected TerminalFrameData, got {:?}", other),
+    }
+}

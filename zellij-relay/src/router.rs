@@ -1,7 +1,7 @@
 //! Axum router and shared application state.
 
 use axum::{
-    routing::{get, any},
+    routing::{any, get, post},
     Router,
 };
 
@@ -31,6 +31,29 @@ pub fn build_router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/tunnel/control", any(crate::tunnel_control::handler))
         .route("/tunnel/terminal", any(crate::tunnel_terminal::handler))
+        .route("/r/{slug}", get(crate::viewer::serve_html))
+        .route("/r/{slug}/info/version", get(crate::viewer::version))
+        .route("/r/{slug}/session", post(crate::viewer::post_session))
+        .route(
+            "/r/{slug}/command/login",
+            post(crate::viewer::post_login),
+        )
+        .route(
+            "/r/{slug}/ws/terminal",
+            any(crate::viewer::ws_terminal),
+        )
+        .route(
+            "/r/{slug}/ws/terminal/{session}",
+            any(crate::viewer::ws_terminal_with_session),
+        )
+        .route(
+            "/r/{slug}/ws/control",
+            any(crate::viewer::ws_control),
+        )
+        .route(
+            "/r/{slug}/assets/{*path}",
+            get(crate::viewer::serve_asset),
+        )
         .with_state(state)
 }
 

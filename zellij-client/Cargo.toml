@@ -34,9 +34,9 @@ serde_json = { workspace = true }
 serde_yaml = { version = "0.8", default-features = false }
 url = { workspace = true }
 uuid = { workspace = true }
-include_dir = { workspace = true }
 zellij-utils = { workspace = true }
 zellij-relay-protocol = { workspace = true, optional = true }
+zellij-web-client-assets = { workspace = true, optional = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 isahc = { workspace = true }
@@ -84,5 +84,6 @@ web_server_capability = [
     "dep:axum-server",
     "dep:tower-http",
     "dep:zellij-relay-protocol",
+    "dep:zellij-web-client-assets",
     "zellij-utils/web_server_capability",
 ]

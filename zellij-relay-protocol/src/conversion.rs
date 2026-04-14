@@ -26,13 +26,42 @@ pub enum ControlMessage {
     Error {
         message: String,
     },
+    AuthChallenge {
+        request_id: Vec<u8>,
+        token_hash: String,
+    },
+    AuthResponse {
+        request_id: Vec<u8>,
+        client_id: u32,
+        accepted: bool,
+        is_read_only: bool,
+        session_token_hash: String,
+    },
+    ClientConnected {
+        client_id: u32,
+    },
+    ClientDisconnected {
+        client_id: u32,
+    },
+    ControlFrameData {
+        client_id: u32,
+        data: Vec<u8>,
+    },
 }
 
 /// High-level Rust view of a terminal-tunnel frame.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TerminalMessage {
-    Ready { tunnel_id: String },
-    Error { message: String },
+    Ready {
+        tunnel_id: String,
+    },
+    Error {
+        message: String,
+    },
+    TerminalFrameData {
+        client_id: u32,
+        data: Vec<u8>,
+    },
 }
 
 impl ControlMessage {
@@ -89,6 +118,35 @@ impl From<ControlMessage> for proto::ControlFrame {
             ControlMessage::Error { message } => {
                 Payload::Error(proto::TunnelError { message })
             },
+            ControlMessage::AuthChallenge {
+                request_id,
+                token_hash,
+            } => Payload::AuthChallenge(proto::AuthChallenge {
+                request_id,
+                token_hash,
+            }),
+            ControlMessage::AuthResponse {
+                request_id,
+                client_id,
+                accepted,
+                is_read_only,
+                session_token_hash,
+            } => Payload::AuthResponse(proto::AuthResponse {
+                request_id,
+                client_id,
+                accepted,
+                is_read_only,
+                session_token_hash,
+            }),
+            ControlMessage::ClientConnected { client_id } => {
+                Payload::ClientConnected(proto::ClientConnected { client_id })
+            },
+            ControlMessage::ClientDisconnected { client_id } => {
+                Payload::ClientDisconnected(proto::ClientDisconnected { client_id })
+            },
+            ControlMessage::ControlFrameData { client_id, data } => {
+                Payload::ControlFrameData(proto::ControlFrameData { client_id, data })
+            },
         };
         proto::ControlFrame {
             payload: Some(payload),
@@ -116,6 +174,27 @@ impl TryFrom<proto::ControlFrame> for ControlMessage {
             Some(Payload::Error(e)) => Ok(ControlMessage::Error {
                 message: e.message,
             }),
+            Some(Payload::AuthChallenge(c)) => Ok(ControlMessage::AuthChallenge {
+                request_id: c.request_id,
+                token_hash: c.token_hash,
+            }),
+            Some(Payload::AuthResponse(r)) => Ok(ControlMessage::AuthResponse {
+                request_id: r.request_id,
+                client_id: r.client_id,
+                accepted: r.accepted,
+                is_read_only: r.is_read_only,
+                session_token_hash: r.session_token_hash,
+            }),
+            Some(Payload::ClientConnected(c)) => Ok(ControlMessage::ClientConnected {
+                client_id: c.client_id,
+            }),
+            Some(Payload::ClientDisconnected(c)) => Ok(ControlMessage::ClientDisconnected {
+                client_id: c.client_id,
+            }),
+            Some(Payload::ControlFrameData(d)) => Ok(ControlMessage::ControlFrameData {
+                client_id: d.client_id,
+                data: d.data,
+            }),
             None => Err(anyhow!("ControlFrame has no payload")),
         }
     }
@@ -132,6 +211,9 @@ impl From<TerminalMessage> for proto::TerminalFrame {
             },
             TerminalMessage::Error { message } => {
                 Payload::Error(proto::TunnelError { message })
+            },
+            TerminalMessage::TerminalFrameData { client_id, data } => {
+                Payload::TerminalFrameData(proto::TerminalFrameData { client_id, data })
             },
         };
         proto::TerminalFrame {
@@ -151,6 +233,10 @@ impl TryFrom<proto::TerminalFrame> for TerminalMessage {
             }),
             Some(Payload::Error(e)) => Ok(TerminalMessage::Error {
                 message: e.message,
+            }),
+            Some(Payload::TerminalFrameData(d)) => Ok(TerminalMessage::TerminalFrameData {
+                client_id: d.client_id,
+                data: d.data,
             }),
             None => Err(anyhow!("TerminalFrame has no payload")),
         }
