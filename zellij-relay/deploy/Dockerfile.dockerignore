@@ -1,0 +1,32 @@
+# Picked up by BuildKit when building with -f zellij-relay/deploy/Dockerfile.
+# Keeps the upload over the SSH docker context small and the build fast.
+
+# Build artefacts
+target/
+**/target/
+
+# VCS
+.git/
+.gitignore
+
+# Editor / OS junk
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Pre-built WASM plugin artefacts (rebuilt by cargo if needed; relay doesn't use them)
+assets/plugins/
+**/*.wasm
+
+# Docs & screenshots — not needed for a cargo build
+docs/
+screenshots/
+*.gif
+*.png
+*.jpg
+*.mp4
+
+# The deploy dir itself — avoids recursion when the build context is the workspace root
+zellij-relay/deploy/

@@ -35,7 +35,7 @@ use crate::web_client::control_message::{
     SetConfigPayload, WebClientToWebServerControlMessage,
     WebClientToWebServerControlMessagePayload, WebServerToWebClientControlMessage,
 };
-use crate::web_client::message_handlers::parse_stdin;
+use crate::web_client::message_handlers::{parse_stdin, StdinSession};
 use crate::web_client::server_listener::zellij_server_listener;
 
 pub async fn run_multiplexer(
@@ -439,12 +439,13 @@ fn spawn_virtual_client(
     let os_api_input = os_api.clone();
     tokio::spawn(async move {
         let mut mouse_old_event = MouseEvent::new();
+        let mut stdin_session = StdinSession::new(explicitly_disable_kitty_keyboard_protocol);
         while let Some(buf) = terminal_input_rx.recv().await {
             parse_stdin(
                 &buf,
                 os_api_input.clone(),
                 &mut mouse_old_event,
-                explicitly_disable_kitty_keyboard_protocol,
+                &mut stdin_session,
             );
         }
     });

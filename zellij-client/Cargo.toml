@@ -40,7 +40,7 @@ zellij-web-client-assets = { workspace = true, optional = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 isahc = { workspace = true }
-tokio-tungstenite = "0.20"
+tokio-tungstenite = { version = "0.20", features = ["rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["std"] }
 tokio-rustls = "0.26"
 rustls-pemfile = "2"
