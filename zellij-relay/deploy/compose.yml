@@ -1,0 +1,54 @@
+name: zellij-relay
+
+services:
+  relay:
+    build:
+      context: ../..
+      dockerfile: zellij-relay/deploy/Dockerfile
+    environment:
+      RELAY_BIND_ADDR: "0.0.0.0:8765"
+      RELAY_PUBLIC_URL_TEMPLATE: "https://${PUBLIC_HOST:?set PUBLIC_HOST}/r/{slug}"
+      RUST_LOG: "info"
+    restart: unless-stopped
+    expose:
+      - "8765"
+
+  nginx:
+    build:
+      context: ./nginx
+      args:
+        PUBLIC_HOST: "${PUBLIC_HOST:?set PUBLIC_HOST}"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - letsencrypt:/etc/letsencrypt:ro
+      - certbot-webroot:/var/www/certbot:ro
+    depends_on:
+      - relay
+    restart: unless-stopped
+
+  # Long-running certbot for unattended renewal. The initial cert is obtained
+  # by bootstrap-cert.sh before this stack comes up; from then on renew runs
+  # every 12h via the webroot that nginx serves.
+  certbot:
+    image: certbot/certbot:latest
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+      - certbot-webroot:/var/www/certbot
+    entrypoint:
+      - sh
+      - -c
+      - |
+        trap exit TERM
+        while :; do
+          certbot renew --quiet --webroot -w /var/www/certbot
+          sleep 12h & wait $${!}
+        done
+    restart: unless-stopped
+    depends_on:
+      - nginx
+
+volumes:
+  letsencrypt:
+  certbot-webroot:

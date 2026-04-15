@@ -1949,6 +1949,7 @@ pub struct Options {
     pub theme_dark: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag="47")]
     pub theme_light: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="48")]
     pub relay_server_url: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// Pane-targeting action messages

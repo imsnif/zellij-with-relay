@@ -125,10 +125,10 @@ pub async fn listen_to_web_server_instructions(
                                 tunnel_id: String::new(),
                             },
                             Err(e) => {
-                                log::error!("Relay tunnel establish failed: {}", e);
+                                log::error!("Relay tunnel establish failed: {:#}", e);
                                 WebServerResponse::RelayTunnelError {
                                     client_id,
-                                    message: e.to_string(),
+                                    message: format!("{:#}", e),
                                 }
                             },
                         };
