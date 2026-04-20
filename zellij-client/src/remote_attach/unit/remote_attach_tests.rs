@@ -422,7 +422,9 @@ mod tests {
                 forget,
                 None,
                 true, // insecure for tests
+                &[],
             )
+            .map(|attached| attached.connections)
         })
         .await
         .unwrap()

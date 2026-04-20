@@ -205,16 +205,20 @@ pub async fn establish_websocket_connections(
     let ws_protocol = if is_tls { "wss" } else { "ws" };
     let base_host = format!("{}:{}", host, port);
 
+    // Preserve any path prefix (e.g. `/r/<slug>` for relay URLs) so the
+    // WS endpoints land on the right mount point.
+    let path_prefix = parsed_url.path().trim_end_matches('/').to_string();
+
     let terminal_url = if session_name.is_empty() {
         format!(
-            "{}://{}{WS_TERMINAL_ENDPOINT}?web_client_id={}",
+            "{}://{}{path_prefix}{WS_TERMINAL_ENDPOINT}?web_client_id={}",
             ws_protocol,
             base_host,
             urlencoding::encode(web_client_id)
         )
     } else {
         format!(
-            "{}://{}{WS_TERMINAL_ENDPOINT}/{}?web_client_id={}",
+            "{}://{}{path_prefix}{WS_TERMINAL_ENDPOINT}/{}?web_client_id={}",
             ws_protocol,
             base_host,
             urlencoding::encode(session_name),
@@ -222,7 +226,7 @@ pub async fn establish_websocket_connections(
         )
     };
 
-    let control_url = format!("{}://{}{WS_CONTROL_ENDPOINT}", ws_protocol, base_host);
+    let control_url = format!("{}://{}{path_prefix}{WS_CONTROL_ENDPOINT}", ws_protocol, base_host);
 
     log::info!("Connecting to terminal WebSocket: {}", terminal_url);
     log::info!("Connecting to control WebSocket: {}", control_url);

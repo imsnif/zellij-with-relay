@@ -73,6 +73,21 @@ function createModalStyles() {
       border-bottom: 1px solid ${terminalLight};
       padding-bottom: 8px;
     }
+
+    .security-modal .e2e-indicator {
+      margin: 0 0 14px 0;
+      color: ${terminalTextDim};
+      font-size: 13px;
+      letter-spacing: 0.3px;
+    }
+    .security-modal .e2e-status-on {
+      color: ${zellijGreen};
+      font-weight: 600;
+    }
+    .security-modal .e2e-status-off {
+      color: ${zellijYellow};
+      font-weight: 600;
+    }
     
     .security-modal.error .security-modal-content {
       border-color: ${errorRed};
@@ -341,13 +356,37 @@ function createModalStyles() {
 function getSecurityToken() {
   return new Promise((resolve) => {
     createModalStyles();
-    
+
+    // Renders the one-time E2E indicator next to the token prompt. The
+    // value is read from the hidden form field that the server stamps
+    // into the challenge HTML (true = 🔒 encrypted, anything else = 🔓).
+    const e2eEl = document.getElementById('zellij-expected-e2e');
+    const expectedE2e = e2eEl && e2eEl.value === 'true';
+    // On known-relay hosts the indicator is always locked — matches the
+    // KNOWN_RELAY_HOSTS list in auth.js.
+    const isKnownRelay = (() => {
+      const host = location.hostname.toLowerCase();
+      const list = ['zellij.dev'];
+      for (const r of list) {
+        if (host === r || host.endsWith('.' + r)) return true;
+      }
+      return false;
+    })();
+    const showLocked = expectedE2e || isKnownRelay;
+    // Colour highlights the "encrypted" / "not encrypted" phrase while
+    // keeping the surrounding sentence readable. Colours are deliberately
+    // chosen to be visible on both light and dark modal backgrounds.
+    const indicatorHtml = showLocked
+      ? 'This session is <span class="e2e-status-on">end-to-end encrypted</span>'
+      : 'This session is <span class="e2e-status-off">not end-to-end encrypted</span>';
+
     const modal = document.createElement('div');
     modal.className = 'security-modal';
-    
+
     modal.innerHTML = `
       <div class="security-modal-content">
         <h3>Security Token Required</h3>
+        <div class="e2e-indicator">${indicatorHtml}</div>
         <input type="password" id="token" placeholder="Enter your security token">
         <label>
           <input type="checkbox" id="remember">

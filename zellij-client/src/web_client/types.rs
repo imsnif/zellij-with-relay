@@ -83,6 +83,10 @@ pub struct ConnectionTable {
     pub client_id_to_channels: HashMap<String, ClientChannels>,
     pub client_read_only_status: HashMap<String, bool>,
     pub client_session_token_hash: HashMap<String, String>,
+    /// Per-client E2E key, populated when the web server's
+    /// `encrypt_web_sharing` opt-in is on. Absent means plaintext.
+    /// Using `[u8; 32]` (AES-256) directly to avoid another dep.
+    pub client_e2e_key: HashMap<String, [u8; 32]>,
 }
 
 #[derive(Debug, Clone)]
@@ -165,12 +169,30 @@ pub struct AppState {
     pub session_manager: Arc<dyn SessionManager>,
     pub client_os_api_factory: Arc<dyn ClientOsApiFactory>,
     pub is_https: bool,
+    /// Whether E2E encryption is enabled for local web clients. Sourced
+    /// from `Options.encrypt_web_sharing`. When `true`, `serve_html`
+    /// stamps `EXPECTED_E2E=true` into the challenge page and
+    /// `create_new_client` derives + stores a per-client AES key.
+    pub encrypt_web_sharing: bool,
+    /// Session-local HKDF `info` parameter. Generated once at web-server
+    /// startup so the key the browser derives matches the server's even
+    /// when the option is toggled on an existing session (the browser
+    /// reads it from the login page — see Step 6).
+    pub local_tunnel_id: String,
 }
 
 #[derive(Serialize)]
 pub struct CreateClientIdResponse {
     pub web_client_id: String,
     pub is_read_only: bool,
+    /// Whether the server will encrypt terminal frames on this
+    /// connection. Must match the `EXPECTED_E2E` value the challenge page
+    /// served; the browser JS refuses to proceed on mismatch.
+    pub e2e_encrypted: bool,
+    /// HKDF `info` parameter used when deriving the per-client E2E key.
+    /// Present regardless of the `e2e_encrypted` flag so the browser can
+    /// always cache it (cheaply) and only use it when encryption is on.
+    pub tunnel_id: String,
 }
 
 #[derive(Deserialize)]

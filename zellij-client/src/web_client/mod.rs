@@ -209,6 +209,8 @@ pub async fn serve_web_client(
         .collect();
 
     let is_https = rustls_config.is_some();
+    let encrypt_web_sharing = config_options.encrypt_web_sharing.unwrap_or(false);
+    let local_tunnel_id = Uuid::new_v4().to_string();
     let state = AppState {
         connection_table: connection_table.clone(),
         config: Arc::new(Mutex::new(config)),
@@ -217,6 +219,8 @@ pub async fn serve_web_client(
         session_manager: session_manager.clone(),
         client_os_api_factory: client_os_api_factory.clone(),
         is_https,
+        encrypt_web_sharing,
+        local_tunnel_id,
     };
 
     let relay_ctx = RelayContext {

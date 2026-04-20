@@ -88,6 +88,17 @@ impl ConnectionTable {
         }
         self.client_read_only_status.remove(client_id);
         self.client_session_token_hash.remove(client_id);
+        self.client_e2e_key.remove(client_id);
+    }
+
+    /// Store the per-client AES-256 key used by the local web path when
+    /// `encrypt_web_sharing` is enabled. Absence of a key means plaintext.
+    pub fn set_client_e2e_key(&mut self, client_id: &str, key: [u8; 32]) {
+        self.client_e2e_key.insert(client_id.to_owned(), key);
+    }
+
+    pub fn get_client_e2e_key(&self, client_id: &str) -> Option<[u8; 32]> {
+        self.client_e2e_key.get(client_id).copied()
     }
 
     pub fn get_should_not_reconnect_flag(&self, client_id: &str) -> Option<Arc<AtomicBool>> {

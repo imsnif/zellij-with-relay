@@ -793,6 +793,15 @@ pub(crate) fn start_client(opts: CliArgs) {
                     ca_cert,
                     insecure,
                     config_options.client_async_worker_tasks,
+                    // Thread the local `relay_server_url` into the
+                    // attach client's known-relay list so a self-hosted
+                    // relay configured on this machine is trusted
+                    // enough to enforce E2E.
+                    config_options
+                        .relay_server_url
+                        .iter()
+                        .cloned()
+                        .collect(),
                 ) {
                     eprintln!("{}", e);
                     std::process::exit(2);

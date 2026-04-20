@@ -1175,6 +1175,7 @@ message Options {
   optional string theme_dark = 46;
   optional string theme_light = 47;
   optional string relay_server_url = 48;
+  optional bool encrypt_web_sharing = 49;
 }
 
 enum OnForceClose {

@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 
+use zellij_relay_protocol::crypto::KEY_LEN;
 use zellij_utils::{
     data::ClientId,
     input::{config::Config, options::Options},
@@ -57,6 +58,16 @@ pub struct RelayTunnelState {
     /// Writer queue for encoded `TerminalMessage` bytes.
     pub terminal_tunnel_tx: mpsc::UnboundedSender<Vec<u8>>,
 
+    /// Tunnel id returned by the relay in `TunnelEstablished`. Used as the
+    /// HKDF `info` parameter when deriving per-client AES keys so a reused
+    /// token across reconnections produces a fresh key per tunnel.
+    pub tunnel_id: String,
+
+    /// Keys derived during `AuthChallenge` handling, drained when the
+    /// matching `ClientConnected` arrives and a virtual client is spawned.
+    /// Keyed by the Zellij-allocated `client_id`.
+    pub pending_e2e_keys: Mutex<HashMap<u32, [u8; KEY_LEN]>>,
+
     pub session_name: String,
     pub connection_table: Arc<Mutex<ConnectionTable>>,
     pub os_api_factory: Arc<dyn ClientOsApiFactory>,
@@ -79,3 +90,4 @@ pub struct RelayVirtualClient {
     /// Fires when the virtual client is being torn down.
     pub shutdown: Option<oneshot::Sender<()>>,
 }
+

@@ -2801,6 +2801,9 @@ impl Options {
         let relay_server_url =
             kdl_property_first_arg_as_string_or_error!(kdl_options, "relay_server_url")
                 .map(|(string, _entry)| string.to_string());
+        let encrypt_web_sharing =
+            kdl_property_first_arg_as_bool_or_error!(kdl_options, "encrypt_web_sharing")
+                .map(|(v, _)| v);
         let post_command_discovery_hook =
             kdl_property_first_arg_as_string_or_error!(kdl_options, "post_command_discovery_hook")
                 .map(|(hook, _entry)| hook.to_string());
@@ -2875,6 +2878,7 @@ impl Options {
             web_server_key,
             enforce_https_for_localhost,
             relay_server_url,
+            encrypt_web_sharing,
             post_command_discovery_hook,
             client_async_worker_tasks,
         })
@@ -3922,6 +3926,35 @@ impl Options {
             None
         }
     }
+    fn encrypt_web_sharing_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
+        let comment_text = format!(
+            "{}\n{}\n{}\n{}\n{}",
+            "/// End-to-end encrypt traffic from the local Zellij web server",
+            "/// to web clients. Relay-path sharing is always E2E-encrypted;",
+            "/// this flag only controls the local web path.",
+            "/// Default: false",
+            "// ",
+        );
+
+        let create_node = |node_value: bool| -> KdlNode {
+            let mut node = KdlNode::new("encrypt_web_sharing");
+            node.push(KdlValue::Bool(node_value));
+            node
+        };
+        if let Some(encrypt_web_sharing) = self.encrypt_web_sharing {
+            let mut node = create_node(encrypt_web_sharing);
+            if add_comments {
+                node.set_leading(format!("{}\n", comment_text));
+            }
+            Some(node)
+        } else if add_comments {
+            let mut node = create_node(false);
+            node.set_leading(format!("{}\n// ", comment_text));
+            Some(node)
+        } else {
+            None
+        }
+    }
     fn enforce_https_for_localhost_to_kdl(&self, add_comments: bool) -> Option<KdlNode> {
         let comment_text = format!(
             "{}\n{}\n{}\n{}\n{}\n{}\n{}",
@@ -4391,6 +4424,9 @@ impl Options {
         }
         if let Some(relay_server_url) = self.relay_server_url_to_kdl(add_comments) {
             nodes.push(relay_server_url);
+        }
+        if let Some(encrypt_web_sharing) = self.encrypt_web_sharing_to_kdl(add_comments) {
+            nodes.push(encrypt_web_sharing);
         }
         if let Some(stacked_resize) = self.stacked_resize_to_kdl(add_comments) {
             nodes.push(stacked_resize);

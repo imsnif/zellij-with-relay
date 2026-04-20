@@ -21,10 +21,18 @@
         <title>Zellij Web Client</title>
     </head>
     <body data-authenticated="IS_AUTHENTICATED">
+        <!--
+          Zellij E2E-encryption advertisement. The server substitutes
+          "true" or "false" for EXPECTED_E2E. The viewer JS cross-checks
+          this against the value it receives in the /session auth response;
+          a mismatch blocks the login before any STDIN is transmitted.
+        -->
+        <input type="hidden" id="zellij-expected-e2e" value="EXPECTED_E2E" />
         <div id="terminal" tabindex="0"></div>
         <script src="assets/modals.js"></script>
         <!-- Module files - order matters -->
         <script type="module" src="assets/utils.js"></script>
+        <script type="module" src="assets/crypto.js"></script>
         <script type="module" src="assets/connection.js"></script>
         <script type="module" src="assets/auth.js"></script>
         <script type="module" src="assets/keyboard.js"></script>

@@ -19,6 +19,7 @@ use axum::{
 use futures::StreamExt;
 use std::sync::{atomic::AtomicBool, Arc};
 use tokio_util::sync::CancellationToken;
+use zellij_relay_protocol::crypto;
 use zellij_utils::{
     input::mouse::MouseEvent,
     ipc::{ClientToServerMsg, PixelDimensions},
@@ -174,6 +175,11 @@ async fn handle_ws_terminal(
 
     let (client_terminal_channel_tx, mut client_terminal_channel_rx) = socket.split();
     let (stdout_channel_tx, stdout_channel_rx) = tokio::sync::mpsc::unbounded_channel();
+    let e2e_key = state
+        .connection_table
+        .lock()
+        .unwrap()
+        .get_client_e2e_key(&web_client_id);
     state
         .connection_table
         .lock()
@@ -206,6 +212,7 @@ async fn handle_ws_terminal(
         client_terminal_channel_tx,
         terminal_channel_cancellation_token.clone(),
         should_not_reconnect,
+        e2e_key,
     );
     state
         .connection_table
@@ -280,8 +287,24 @@ async fn handle_ws_terminal(
                     log::error!("Unknown web_client_id: {}", web_client_id);
                     continue;
                 };
+                // With E2E on, decrypt before handing to the parser; a
+                // failure here implies tampering or a client bug — drop
+                // the frame and wait for the next one.
+                let parsed: Vec<u8> = match &e2e_key {
+                    Some(key) => match crypto::decrypt(key, &buf) {
+                        Ok(plaintext) => plaintext,
+                        Err(e) => {
+                            log::warn!(
+                                "local e2e decrypt failed for client {}: {} — dropping frame",
+                                web_client_id, e
+                            );
+                            continue;
+                        }
+                    },
+                    None => buf.to_vec(),
+                };
                 parse_stdin(
-                    &buf,
+                    &parsed,
                     client_connection.clone(),
                     &mut mouse_old_event,
                     &mut stdin_session,
@@ -298,6 +321,15 @@ async fn handle_ws_terminal(
                     log::error!("Unknown web_client_id: {}", web_client_id);
                     continue;
                 };
+                if e2e_key.is_some() {
+                    // With E2E on, plaintext frames from the client are a
+                    // protocol error — the client should always encrypt.
+                    log::warn!(
+                        "got plaintext Text frame from client {} while E2E is on — dropping",
+                        web_client_id
+                    );
+                    continue;
+                }
                 parse_stdin(
                     msg.as_bytes(),
                     client_connection.clone(),

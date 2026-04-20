@@ -227,6 +227,24 @@ pub fn validate_session_token(session_token: &str) -> Result<bool> {
     Ok(count > 0)
 }
 
+/// Look up the `auth_token_hash` associated with a session token. Used by
+/// the E2E key-derivation path so the Zellij web server can derive the
+/// same key the browser derives from the raw auth token it typed in.
+pub fn get_auth_token_hash_for_session(session_token: &str) -> Result<Option<String>> {
+    let conn = open_db()?;
+    let session_token_hash = hash_token(session_token);
+    match conn.query_row(
+        "SELECT auth_token_hash FROM session_tokens
+         WHERE session_token_hash = ?1 AND expires_at > datetime('now')",
+        [&session_token_hash],
+        |row| row.get::<_, String>(0),
+    ) {
+        Ok(hash) => Ok(Some(hash)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(TokenError::Database(e)),
+    }
+}
+
 pub fn is_session_token_read_only(session_token: &str) -> Result<bool> {
     let conn = open_db()?;
 

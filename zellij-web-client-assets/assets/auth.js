@@ -3,6 +3,41 @@
  */
 
 import { getBaseUrl } from "./utils.js";
+import { sha256Hex, deriveKey } from "./crypto.js";
+
+/**
+ * Hosts that always operate behind an E2E-enforcing relay. Any URL whose
+ * hostname (or a subdomain thereof) matches one of these entries has its
+ * `expectedE2e` flag forced to `true`, independent of the hidden form
+ * field on the challenge page. A compromised relay serving
+ * `EXPECTED_E2E=false` is therefore caught before any STDIN is sent.
+ */
+const KNOWN_RELAY_HOSTS = ["zellij.dev"];
+
+/**
+ * Returns true if the current page's URL is a known-relay URL. Exact
+ * match or `.<host>` suffix so `relay.zellij.dev` and `my.zellij.dev`
+ * are recognised but an unrelated `zellij.dev.evil.com` is not.
+ */
+function pageIsOnKnownRelay() {
+    const host = location.hostname.toLowerCase();
+    for (const r of KNOWN_RELAY_HOSTS) {
+        if (host === r || host.endsWith("." + r)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** Read the challenge-page `expectedE2e` claim, forcing true on known relays. */
+function readExpectedE2e() {
+    if (pageIsOnKnownRelay()) {
+        return true;
+    }
+    const el = document.getElementById("zellij-expected-e2e");
+    if (!el) return false;
+    return el.value === "true";
+}
 
 /**
  * Wait for user to provide a security token
@@ -33,9 +68,9 @@ async function waitForSecurityToken() {
  * @param {string} token - Authentication token
  * @param {boolean} rememberMe - Remember login preference
  * @param {boolean} hasAuthenticationCookie - Whether auth cookie exists
- * @returns {Promise<string|null>} Client ID or null on failure
+ * @returns {Promise<{webClientId: string, e2e: ?{key: CryptoKey}} | null>} null on failure
  */
-export async function getClientId(token, rememberMe, hasAuthenticationCookie) {
+export async function getClientId(token, rememberMe, hasAuthenticationCookie, expectedE2e) {
     const baseUrl = getBaseUrl();
 
     if (!hasAuthenticationCookie) {
@@ -83,20 +118,53 @@ export async function getClientId(token, rememberMe, hasAuthenticationCookie) {
             `Error ${data.status} connecting to server.`
         );
         return null;
-    } else {
-        let body = await data.json();
-        return body.web_client_id;
     }
+
+    let body = await data.json();
+    const serverE2e = body.e2e_encrypted === true;
+
+    // Cross-check: the server's claim must not be weaker than what the
+    // page (or known-relay override) advertised. Stronger is allowed so
+    // clients can opportunistically upgrade.
+    if (expectedE2e && !serverE2e) {
+        await showErrorModal(
+            "Refused",
+            "This session was advertised as end-to-end encrypted, but the server does not confirm it. Refusing to connect."
+        );
+        return null;
+    }
+
+    let e2e = null;
+    if (serverE2e) {
+        // Derive the same key the server derived: HKDF over the
+        // hex-encoded SHA-256 of the raw token, with info=tunnel_id.
+        if (!body.tunnel_id || typeof body.tunnel_id !== "string") {
+            await showErrorModal(
+                "Error",
+                "Server did not return a tunnel id; cannot enable encryption."
+            );
+            return null;
+        }
+        const tokenHashHex = await sha256Hex(token);
+        const key = await deriveKey(tokenHashHex, body.tunnel_id);
+        e2e = { key };
+    }
+
+    return {
+        webClientId: body.web_client_id,
+        e2e,
+    };
 }
 
 /**
  * Initialize authentication flow and return client ID
- * @returns {Promise<string>} Client ID
+ * @returns {Promise<{webClientId: string, e2e: ?{key: CryptoKey}}>}
  */
 export async function initAuthentication() {
     let token = null;
     let remember = null;
     let hasAuthenticationCookie = document.body.dataset.authenticated === "true";
+    const expectedE2e = readExpectedE2e();
 
     if (!hasAuthenticationCookie) {
         const tokenResult = await waitForSecurityToken();
@@ -104,15 +172,16 @@ export async function initAuthentication() {
         remember = tokenResult.remember;
     }
 
-    let webClientId;
+    let session;
 
-    while (!webClientId) {
-        webClientId = await getClientId(
+    while (!session) {
+        session = await getClientId(
             token,
             remember,
-            hasAuthenticationCookie
+            hasAuthenticationCookie,
+            expectedE2e,
         );
-        if (!webClientId) {
+        if (!session) {
             hasAuthenticationCookie = false;
             const tokenResult = await waitForSecurityToken();
             token = tokenResult.token;
@@ -120,5 +189,5 @@ export async function initAuthentication() {
         }
     }
 
-    return webClientId;
+    return session;
 }

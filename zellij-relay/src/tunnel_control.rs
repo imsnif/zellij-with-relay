@@ -151,6 +151,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 accepted,
                 is_read_only,
                 session_token_hash,
+                e2e_encrypted,
             } => {
                 let sender = reader_entry
                     .pending_auths
@@ -163,6 +164,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                         client_id,
                         is_read_only,
                         session_token_hash,
+                        e2e_encrypted,
                     });
                 } else {
                     tracing::warn!(slug = %reader_entry.slug, "AuthResponse for unknown request_id");

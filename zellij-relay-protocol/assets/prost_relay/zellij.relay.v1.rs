@@ -51,6 +51,11 @@ pub struct AuthChallenge {
     pub token_hash: ::prost::alloc::string::String,
 }
 /// Zellij → Relay: result of an AuthChallenge.
+///
+/// `e2e_encrypted` tells the relay (and, via `/session`, the viewer) whether
+/// the Zellij side will encrypt the TerminalFrameData payloads it sends for
+/// this client. Relay-path viewers always see `true` in Phase 3+; local-web
+/// viewers see `true` only when the sharer opted in via `encrypt_web_sharing`.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AuthResponse {
@@ -64,6 +69,8 @@ pub struct AuthResponse {
     pub is_read_only: bool,
     #[prost(string, tag="5")]
     pub session_token_hash: ::prost::alloc::string::String,
+    #[prost(bool, tag="6")]
+    pub e2e_encrypted: bool,
 }
 /// Relay → Zellij: a new viewer has attached to the tunnel.
 #[allow(clippy::derive_partial_eq_without_eq)]

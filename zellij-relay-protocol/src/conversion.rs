@@ -36,6 +36,7 @@ pub enum ControlMessage {
         accepted: bool,
         is_read_only: bool,
         session_token_hash: String,
+        e2e_encrypted: bool,
     },
     ClientConnected {
         client_id: u32,
@@ -131,12 +132,14 @@ impl From<ControlMessage> for proto::ControlFrame {
                 accepted,
                 is_read_only,
                 session_token_hash,
+                e2e_encrypted,
             } => Payload::AuthResponse(proto::AuthResponse {
                 request_id,
                 client_id,
                 accepted,
                 is_read_only,
                 session_token_hash,
+                e2e_encrypted,
             }),
             ControlMessage::ClientConnected { client_id } => {
                 Payload::ClientConnected(proto::ClientConnected { client_id })
@@ -184,6 +187,7 @@ impl TryFrom<proto::ControlFrame> for ControlMessage {
                 accepted: r.accepted,
                 is_read_only: r.is_read_only,
                 session_token_hash: r.session_token_hash,
+                e2e_encrypted: r.e2e_encrypted,
             }),
             Some(Payload::ClientConnected(c)) => Ok(ControlMessage::ClientConnected {
                 client_id: c.client_id,

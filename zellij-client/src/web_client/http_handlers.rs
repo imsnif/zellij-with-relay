@@ -1,4 +1,4 @@
-use crate::web_client::authentication::{IsReadOnly, SessionTokenHash};
+use crate::web_client::authentication::{AuthTokenHash, IsReadOnly, SessionTokenHash};
 use crate::web_client::types::{AppState, CreateClientIdResponse, LoginRequest, LoginResponse};
 use crate::web_client::utils::parse_cookies;
 use axum::{
@@ -9,6 +9,7 @@ use axum::{
 };
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use uuid::Uuid;
+use zellij_relay_protocol::crypto;
 use zellij_utils::{consts::VERSION, web_authentication_tokens::create_session_token};
 
 fn html_escape(s: &str) -> String {
@@ -33,10 +34,16 @@ pub async fn serve_html(State(state): State<AppState>, request: Request) -> Html
             .clone()
             .unwrap_or("/".to_string()),
     );
+    let expected_e2e = if state.encrypt_web_sharing {
+        "true"
+    } else {
+        "false"
+    };
 
     let html = Html(
         zellij_web_client_assets::INDEX_HTML
             .replace("IS_AUTHENTICATED", &format!("{}", auth_value))
+            .replace("EXPECTED_E2E", expected_e2e)
             .replace("BASE_URL", &base_url),
     );
     html
@@ -113,6 +120,7 @@ pub async fn create_new_client(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json("Missing session info".to_string()),
         ))?;
+    let auth_token_hash = request.extensions().get::<AuthTokenHash>().cloned();
 
     let web_client_id = String::from(Uuid::new_v4());
     let os_input = state
@@ -127,9 +135,37 @@ pub async fn create_new_client(
         session_token_hash.0,
     );
 
+    // Derive + stash the per-client E2E key when the opt-in is on. Missing
+    // `auth_token_hash` here means the auth middleware could not look it
+    // up (DB miss); fall back to plaintext rather than reject the session.
+    let e2e_encrypted = if state.encrypt_web_sharing {
+        match auth_token_hash {
+            Some(h) => {
+                let key = crypto::derive_key(&h.0, &state.local_tunnel_id);
+                state
+                    .connection_table
+                    .lock()
+                    .unwrap()
+                    .set_client_e2e_key(&web_client_id, key);
+                true
+            },
+            None => {
+                log::warn!(
+                    "encrypt_web_sharing enabled but no auth_token_hash for client {} — falling back to plaintext",
+                    web_client_id
+                );
+                false
+            },
+        }
+    } else {
+        false
+    };
+
     Ok(Json(CreateClientIdResponse {
         web_client_id,
         is_read_only,
+        e2e_encrypted,
+        tunnel_id: state.local_tunnel_id.clone(),
     }))
 }
 
