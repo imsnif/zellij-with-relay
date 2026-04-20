@@ -247,6 +247,12 @@ web_sharing "disabled"
 /// or "wss://relay.zellij.dev" for the public relay.
 // 
 // relay_server_url "ws://localhost:8765"
+/// End-to-end encrypt traffic from the local Zellij web server
+/// to web clients. Relay-path sharing is always E2E-encrypted;
+/// this flag only controls the local web path.
+/// Default: false
+// 
+// encrypt_web_sharing false
  
 // Whether to stack panes when resizing beyond a certain size
 // Default: true

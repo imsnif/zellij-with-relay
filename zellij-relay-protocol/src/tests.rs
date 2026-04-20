@@ -180,6 +180,7 @@ fn auth_response_roundtrip() {
         accepted: true,
         is_read_only: true,
         session_token_hash: "hash".into(),
+        e2e_encrypted: true,
     };
     let decoded = decode_control_frame(&original.encode()).unwrap();
     match decoded {
@@ -189,13 +190,31 @@ fn auth_response_roundtrip() {
             accepted,
             is_read_only,
             session_token_hash,
+            e2e_encrypted,
         } => {
             assert_eq!(request_id, vec![9, 9]);
             assert_eq!(client_id, 42);
             assert!(accepted);
             assert!(is_read_only);
             assert_eq!(session_token_hash, "hash");
+            assert!(e2e_encrypted);
         },
+        other => panic!("expected AuthResponse, got {:?}", other),
+    }
+}
+
+#[test]
+fn auth_response_e2e_flag_roundtrip_false() {
+    let original = ControlMessage::AuthResponse {
+        request_id: vec![1],
+        client_id: 1,
+        accepted: true,
+        is_read_only: false,
+        session_token_hash: "h".into(),
+        e2e_encrypted: false,
+    };
+    match decode_control_frame(&original.encode()).unwrap() {
+        ControlMessage::AuthResponse { e2e_encrypted, .. } => assert!(!e2e_encrypted),
         other => panic!("expected AuthResponse, got {:?}", other),
     }
 }

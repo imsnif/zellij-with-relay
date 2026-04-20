@@ -15,6 +15,10 @@ pub struct AuthResponseResult {
     pub client_id: u32,
     pub is_read_only: bool,
     pub session_token_hash: String,
+    /// Mirrors the `e2e_encrypted` flag on the Zellij-side `AuthResponse`.
+    /// The relay forwards this to the viewer via `/session` so the JS can
+    /// cross-check it against the `expectedE2e` challenge-page claim.
+    pub e2e_encrypted: bool,
 }
 
 /// Relay-side per-viewer bookkeeping. Keyed by the Zellij-allocated
@@ -37,6 +41,10 @@ pub struct ViewerSession {
     pub client_id: u32,
     pub token_hash: String,
     pub is_read_only: bool,
+    /// Mirrors the Zellij-side `AuthResponse.e2e_encrypted` flag. Returned
+    /// to the viewer on `/session` so the JS can cross-check it against the
+    /// challenge-page claim before transmitting any STDIN.
+    pub e2e_encrypted: bool,
 }
 
 /// Metadata and wiring the relay keeps for an active tunnel.

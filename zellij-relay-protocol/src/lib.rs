@@ -12,6 +12,7 @@ pub mod generated {
 }
 
 mod conversion;
+pub mod crypto;
 
 #[cfg(test)]
 mod tests;

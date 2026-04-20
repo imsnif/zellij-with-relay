@@ -13,6 +13,33 @@ struct LoginRequest {
 #[derive(Deserialize)]
 pub struct SessionResponse {
     pub web_client_id: String,
+    /// Whether the server will encrypt TerminalFrameData payloads on this
+    /// connection. Absent for pre-Phase-3 servers; treated as `false`.
+    #[serde(default)]
+    pub e2e_encrypted: bool,
+    /// HKDF `info` parameter for per-client key derivation. Absent for
+    /// pre-Phase-3 servers.
+    #[serde(default)]
+    pub tunnel_id: Option<String>,
+}
+
+/// Bundle returned to the attach caller: enough to establish WS
+/// connections plus the E2E state needed to encrypt/decrypt frames.
+pub struct AuthResult {
+    pub web_client_id: String,
+    pub http_client: HttpClientWithCookies,
+    /// Set when `--remember` was passed and the server set a cookie.
+    /// Carries both the cookie name (may be `session_token` or
+    /// `relay_session`) and value so the attach client can restore it.
+    pub remembered: Option<RememberedCookie>,
+    pub e2e_encrypted: bool,
+    pub tunnel_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RememberedCookie {
+    pub name: String,
+    pub value: String,
 }
 
 pub async fn authenticate(
@@ -21,7 +48,7 @@ pub async fn authenticate(
     remember_me: bool,
     ca_cert: Option<&std::path::Path>,
     insecure: bool,
-) -> Result<(String, HttpClientWithCookies, Option<String>), RemoteClientError> {
+) -> Result<AuthResult, RemoteClientError> {
     let http_client = HttpClientWithCookies::new(ca_cert, insecure)
         .map_err(|e| RemoteClientError::Other(Box::new(e)))?;
 
@@ -94,27 +121,51 @@ pub async fn authenticate(
     let session_data: SessionResponse =
         serde_json::from_str(&response_body).map_err(|e| RemoteClientError::Other(Box::new(e)))?;
 
-    // Extract session_token if remember_me was true
-    let session_token = if remember_me {
-        http_client.get_cookie("session_token")
+    // Prefer the well-known cookie names the local web server and the
+    // relay set. We only surface one; any extra cookies stay in the jar
+    // for the duration of this run but aren't persisted.
+    let remembered = if remember_me {
+        first_session_cookie(&http_client)
     } else {
         None
     };
 
-    Ok((session_data.web_client_id, http_client, session_token))
+    Ok(AuthResult {
+        web_client_id: session_data.web_client_id,
+        http_client,
+        remembered,
+        e2e_encrypted: session_data.e2e_encrypted,
+        tunnel_id: session_data.tunnel_id,
+    })
+}
+
+/// Return the first session-scoped cookie the server set. `session_token`
+/// is the local web server's cookie; `relay_session` is the relay's.
+fn first_session_cookie(http_client: &HttpClientWithCookies) -> Option<RememberedCookie> {
+    for name in &["session_token", "relay_session"] {
+        if let Some(value) = http_client.get_cookie(name) {
+            return Some(RememberedCookie {
+                name: (*name).to_string(),
+                value,
+            });
+        }
+    }
+    None
 }
 
 pub async fn validate_session_token(
     server_base_url: &str,
-    session_token: &str,
+    cookie_name: &str,
+    cookie_value: &str,
     ca_cert: Option<&std::path::Path>,
     insecure: bool,
-) -> Result<(String, HttpClientWithCookies), RemoteClientError> {
+) -> Result<(SessionResponse, HttpClientWithCookies), RemoteClientError> {
     let http_client = HttpClientWithCookies::new(ca_cert, insecure)
         .map_err(|e| RemoteClientError::Other(Box::new(e)))?;
 
-    // Pre-populate the session_token cookie
-    http_client.set_cookie("session_token".to_string(), session_token.to_string());
+    // Pre-populate the session cookie (name differs between local web
+    // server — `session_token` — and the relay — `relay_session`).
+    http_client.set_cookie(cookie_name.to_string(), cookie_value.to_string());
 
     // Skip /login, go directly to /session endpoint
     let session_url = format!("{}{}", server_base_url, SESSION_ENDPOINT);
@@ -143,7 +194,7 @@ pub async fn validate_session_token(
                 .map_err(|e| RemoteClientError::Other(Box::new(e)))?;
             let session_data: SessionResponse = serde_json::from_str(&response_body)
                 .map_err(|e| RemoteClientError::Other(Box::new(e)))?;
-            Ok((session_data.web_client_id, http_client))
+            Ok((session_data, http_client))
         },
     }
 }

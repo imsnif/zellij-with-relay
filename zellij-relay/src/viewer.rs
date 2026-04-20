@@ -55,6 +55,14 @@ pub struct SessionResponse {
     pub web_client_id: String,
     pub client_id: u32,
     pub is_read_only: bool,
+    /// Whether the Zellij side will encrypt TerminalFrameData payloads on
+    /// this connection. Mirrored from the Zellij `AuthResponse`; on the
+    /// relay path this is always `true` in Phase 3+.
+    pub e2e_encrypted: bool,
+    /// HKDF `info` parameter for per-client E2E key derivation. The
+    /// browser recomputes the same key locally from this value + its
+    /// typed raw auth token's SHA-256 hash.
+    pub tunnel_id: String,
 }
 
 fn hash_auth_token(token: &str) -> String {
@@ -81,8 +89,13 @@ pub async fn serve_html(
     State(_state): State<AppState>,
 ) -> Html<String> {
     let base_url = format!("/r/{}/", slug);
+    // The relay path is unconditionally E2E-encrypted in Phase 3+. The
+    // same string is served for valid and unknown slugs — enumeration
+    // safety is preserved because the encryption-state claim is a global
+    // policy, not per-slug information.
     let html = zellij_web_client_assets::INDEX_HTML
         .replace("IS_AUTHENTICATED", "false")
+        .replace("EXPECTED_E2E", "true")
         .replace("BASE_URL", &base_url);
     Html(html)
 }
@@ -166,6 +179,7 @@ async fn challenge_and_register(
         client_id: resp.client_id,
         token_hash,
         is_read_only: resp.is_read_only,
+        e2e_encrypted: resp.e2e_encrypted,
     };
     entry.sessions.lock().unwrap().insert(session_id, session.clone());
 
@@ -227,6 +241,8 @@ pub async fn post_session(
             web_client_id: virtual_web_client_id(session.client_id),
             client_id: session.client_id,
             is_read_only: session.is_read_only,
+            e2e_encrypted: session.e2e_encrypted,
+            tunnel_id: entry.tunnel_id.to_string(),
         };
         return Json(body).into_response();
     }
@@ -250,6 +266,8 @@ pub async fn post_session(
                 web_client_id: virtual_web_client_id(session.client_id),
                 client_id: session.client_id,
                 is_read_only: session.is_read_only,
+                e2e_encrypted: session.e2e_encrypted,
+                tunnel_id: entry.tunnel_id.to_string(),
             };
             let mut response = Json(body).into_response();
             if let Ok(cookie_header) =

@@ -37,6 +37,7 @@ uuid = { workspace = true }
 zellij-utils = { workspace = true }
 zellij-relay-protocol = { workspace = true, optional = true }
 zellij-web-client-assets = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 isahc = { workspace = true }
@@ -85,5 +86,6 @@ web_server_capability = [
     "dep:tower-http",
     "dep:zellij-relay-protocol",
     "dep:zellij-web-client-assets",
+    "dep:sha2",
     "zellij-utils/web_server_capability",
 ]

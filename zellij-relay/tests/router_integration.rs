@@ -171,6 +171,173 @@ async fn terminal_ready_with_wrong_tunnel_id_rejected() {
     }
 }
 
+/// End-to-end tunnel flow: simulate a Zellij side (control tunnel +
+/// terminal tunnel) and a viewer side (HTTP `POST /session` +
+/// `GET /ws/terminal`), verifying that:
+///
+/// * the relay forwards `AuthChallenge` to the Zellij side,
+/// * `AuthResponse` flows back and is surfaced in the viewer's
+///   `POST /session` response (including `e2e_encrypted` + `tunnel_id`),
+/// * subsequent `TerminalFrameData` emitted on the terminal tunnel
+///   reaches the viewer's terminal WS as **opaque Binary bytes** —
+///   matching the Phase 3 requirement that the relay forwards
+///   ciphertext without inspection.
+#[tokio::test]
+async fn full_tunnel_flow_forwards_ciphertext_opaquely() {
+    use serde_json::json;
+
+    let (http, ws, _registry) = spawn_router().await;
+    let (mut control_ws, _public_url, slug, _tunnel_id) =
+        perform_control_handshake(&ws).await;
+
+    // Open + link the terminal tunnel as the Zellij side would.
+    let term_url = format!("{}/tunnel/terminal?slug={}", ws, slug);
+    let (mut terminal_ws, _) = connect_async(&term_url).await.expect("connect terminal");
+    let ready = TerminalMessage::Ready {
+        tunnel_id: _tunnel_id.clone(),
+    };
+    terminal_ws
+        .send(Message::Binary(ready.encode()))
+        .await
+        .unwrap();
+
+    // Give the relay a moment to link the two sockets.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Concurrently: viewer POSTs /session with a raw auth_token; we
+    // reply from the simulated-Zellij side as soon as the
+    // AuthChallenge arrives.
+    let session_url = format!("{}/r/{}/session", http, slug);
+    let http_client = reqwest::Client::builder()
+        .cookie_store(true)
+        .build()
+        .expect("reqwest client");
+    let viewer_post = http_client
+        .post(&session_url)
+        .json(&json!({"auth_token": "viewer-raw-token"}));
+    let viewer_fut = async { viewer_post.send().await.expect("viewer /session POST") };
+
+    let zellij_fut = async {
+        // Relay forwards AuthChallenge on the control tunnel.
+        let bytes = read_next_binary(&mut control_ws)
+            .await
+            .expect("AuthChallenge");
+        let challenge =
+            decode_control_frame(&bytes).expect("decode AuthChallenge");
+        let (request_id, _token_hash) = match challenge {
+            ControlMessage::AuthChallenge {
+                request_id,
+                token_hash,
+            } => (request_id, token_hash),
+            other => panic!("expected AuthChallenge, got {:?}", other),
+        };
+
+        // Simulated Zellij accepts with E2E on.
+        let response = ControlMessage::AuthResponse {
+            request_id,
+            client_id: 42,
+            accepted: true,
+            is_read_only: false,
+            session_token_hash: "ignored".into(),
+            e2e_encrypted: true,
+        };
+        control_ws
+            .send(Message::Binary(response.encode()))
+            .await
+            .expect("send AuthResponse");
+
+        // Relay should now emit ClientConnected for the allocated id.
+        let bytes = read_next_binary(&mut control_ws)
+            .await
+            .expect("ClientConnected");
+        let connected = decode_control_frame(&bytes).expect("decode");
+        match connected {
+            ControlMessage::ClientConnected { client_id } => {
+                assert_eq!(client_id, 42);
+            },
+            other => panic!("expected ClientConnected, got {:?}", other),
+        }
+    };
+
+    let (viewer_resp, ()) = tokio::join!(viewer_fut, zellij_fut);
+    assert_eq!(viewer_resp.status(), reqwest::StatusCode::OK);
+
+    // Extract the relay_session cookie from the Set-Cookie header
+    // before consuming the body.
+    let set_cookie_header = viewer_resp
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|h| h.to_str().ok())
+        .find(|h| h.starts_with("relay_session="))
+        .map(str::to_owned)
+        .expect("expected relay_session cookie in /session response");
+    let cookie_header = set_cookie_header
+        .split(';')
+        .next()
+        .expect("non-empty Set-Cookie")
+        .trim()
+        .to_string();
+
+    let body: serde_json::Value =
+        viewer_resp.json().await.expect("session JSON body");
+    assert_eq!(body["client_id"], 42);
+    assert_eq!(body["e2e_encrypted"], true);
+    assert_eq!(body["web_client_id"], "relay-client-42");
+    assert_eq!(body["tunnel_id"], _tunnel_id);
+
+    // Now drive an opaque `TerminalFrameData` through the tunnel.
+    // The relay must forward the exact bytes to the viewer's terminal
+    // WS as a Binary frame — no UTF-8 inspection, no payload rewrite.
+
+    let viewer_ws_url = format!("ws://{}/r/{}/ws/terminal", strip_scheme(&http), slug);
+    let request = tokio_tungstenite::tungstenite::http::Request::builder()
+        .uri(&viewer_ws_url)
+        .header("Host", strip_scheme(&http))
+        .header("Upgrade", "websocket")
+        .header("Connection", "Upgrade")
+        .header(
+            "Sec-WebSocket-Key",
+            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+        )
+        .header("Sec-WebSocket-Version", "13")
+        .header("Cookie", cookie_header)
+        .body(())
+        .expect("build WS request");
+    let (mut viewer_ws, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("viewer /ws/terminal");
+
+    // Emit a ciphertext-shaped payload — random bytes with non-UTF-8
+    // bytes mixed in so any accidental UTF-8 path would mangle it.
+    let ciphertext: Vec<u8> = vec![0x00, 0xff, 0xab, 0x42, 0xfe, 0x13, 0x00, 0x80];
+    let frame = TerminalMessage::TerminalFrameData {
+        client_id: 42,
+        data: ciphertext.clone(),
+    };
+    terminal_ws
+        .send(Message::Binary(frame.encode()))
+        .await
+        .expect("send TerminalFrameData");
+
+    let received = timeout(Duration::from_secs(2), viewer_ws.next())
+        .await
+        .expect("viewer frame arrived in time")
+        .expect("stream yielded")
+        .expect("no ws error");
+    match received {
+        Message::Binary(b) => assert_eq!(b, ciphertext),
+        other => panic!(
+            "expected Binary frame on viewer WS (Phase 3 opaque forwarding), got {:?}",
+            other
+        ),
+    }
+}
+
+fn strip_scheme(url: &str) -> &str {
+    url.trim_start_matches("http://").trim_start_matches("https://")
+}
+
 #[tokio::test]
 async fn dropped_control_socket_evicts_registry() {
     let (_http, ws, registry) = spawn_router().await;

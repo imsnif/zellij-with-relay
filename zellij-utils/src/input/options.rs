@@ -273,6 +273,19 @@ pub struct Options {
     #[clap(long, value_parser)]
     #[serde(default)]
     pub relay_server_url: Option<String>,
+    /// Whether to end-to-end encrypt traffic from the local Zellij web
+    /// server to web clients. Relay-path sharing is always E2E-encrypted
+    /// regardless of this option — this flag only controls the local web
+    /// path (any bind address). Default: off.
+    ///
+    /// Note: E2E encryption is a defence-in-depth measure on top of TLS.
+    /// It protects against passive eavesdropping and trusted-but-curious
+    /// intermediaries. An active LAN-level MITM on a plain-HTTP Zellij
+    /// web server can still downgrade the client — use `web_server_cert`
+    /// / `web_server_key` if that is a concern.
+    #[clap(long, value_parser)]
+    #[serde(default)]
+    pub encrypt_web_sharing: Option<bool>,
     /// A command to run after the discovery of running commands when serializing, for the purpose
     /// of manipulating the command (eg. with a regex) before it gets serialized
     #[clap(long, value_parser)]
@@ -388,6 +401,9 @@ impl Options {
         let relay_server_url = other
             .relay_server_url
             .or_else(|| self.relay_server_url.clone());
+        let encrypt_web_sharing = other
+            .encrypt_web_sharing
+            .or(self.encrypt_web_sharing);
         let post_command_discovery_hook = other
             .post_command_discovery_hook
             .or(self.post_command_discovery_hook.clone());
@@ -422,6 +438,7 @@ impl Options {
             session_serialization,
             serialize_pane_viewport,
             relay_server_url,
+            encrypt_web_sharing,
             scrollback_lines_to_serialize,
             styled_underlines,
             serialization_interval,
@@ -527,6 +544,7 @@ impl Options {
         let relay_server_url = other
             .relay_server_url
             .or_else(|| self.relay_server_url.clone());
+        let encrypt_web_sharing = merge_bool(other.encrypt_web_sharing, self.encrypt_web_sharing);
         let post_command_discovery_hook = other
             .post_command_discovery_hook
             .or_else(|| self.post_command_discovery_hook.clone());
@@ -581,6 +599,7 @@ impl Options {
             web_server_key,
             enforce_https_for_localhost,
             relay_server_url,
+            encrypt_web_sharing,
             post_command_discovery_hook,
             client_async_worker_tasks,
         }

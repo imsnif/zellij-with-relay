@@ -143,12 +143,14 @@ use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use futures::{prelude::stream::SplitSink, SinkExt};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_util::sync::CancellationToken;
+use zellij_relay_protocol::crypto;
 
 pub fn render_to_client(
     mut stdout_channel_rx: UnboundedReceiver<String>,
     mut client_channel_tx: SplitSink<WebSocket, Message>,
     cancellation_token: CancellationToken,
     should_not_reconnect: Arc<AtomicBool>,
+    e2e_key: Option<[u8; 32]>,
 ) {
     tokio::spawn(async move {
         loop {
@@ -177,11 +179,20 @@ pub fn render_to_client(
                 result = stdout_channel_rx.recv() => {
                     match result {
                         Some(rendered_bytes) => {
-                            if client_channel_tx
-                                .send(Message::Text(rendered_bytes.into()))
-                                .await
-                                .is_err()
-                            {
+                            // With E2E on, encrypt the rendered bytes and
+                            // send as Binary; without E2E, Text preserves
+                            // the pre-Phase-3 behaviour unchanged.
+                            let frame = match &e2e_key {
+                                Some(key) => match crypto::encrypt(key, rendered_bytes.as_bytes()) {
+                                    Ok(ct) => Message::Binary(ct.into()),
+                                    Err(e) => {
+                                        log::error!("local e2e encrypt failed: {} — dropping frame", e);
+                                        continue;
+                                    }
+                                },
+                                None => Message::Text(rendered_bytes.into()),
+                            };
+                            if client_channel_tx.send(frame).await.is_err() {
                                 break;
                             }
                         }

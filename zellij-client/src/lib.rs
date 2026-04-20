@@ -444,8 +444,10 @@ pub(crate) enum InputInstruction {
 #[cfg(feature = "web_server_capability")]
 pub async fn run_remote_client_terminal_loop(
     os_input: Box<dyn ClientOsApi>,
-    mut connections: remote_attach::WebSocketConnections,
+    attached: remote_attach::AttachedSession,
 ) -> Result<Option<ConnectToSession>, RemoteClientError> {
+    let mut connections = attached.connections;
+    let e2e_key = attached.e2e_key;
     use crate::os_input_output::{AsyncSignals, AsyncStdin};
 
     let synchronised_output = match os_input.env_variable("TERM").as_deref() {
@@ -478,13 +480,35 @@ pub async fn run_remote_client_terminal_loop(
         log::error!("Failed to send resize message: {}", e);
     }
 
+    // Phase 3 client-commitment rule: under E2E, no STDIN byte may be
+    // transmitted before at least one server frame has decrypted
+    // cleanly. We gate the stdin branch of the select below on this
+    // flag; in the non-E2E path it starts unlocked. Stdin back-pressure
+    // is handled naturally — the tokio::select! branch simply becomes
+    // uninterested in the stdin future until the flag flips.
+    let mut stdin_unlocked = e2e_key.is_none();
+
     loop {
         tokio::select! {
-            // Handle stdin input
-            result = async_stdin.read() => {
+            // Handle stdin input (gated under E2E until first clean decrypt).
+            result = async_stdin.read(), if stdin_unlocked => {
                 match result {
                     Ok(buf) if !buf.is_empty() => {
-                        if let Err(e) = connections.terminal_ws.send(Message::Binary(buf)).await {
+                        // With E2E on, encrypt before sending; the server
+                        // decrypts with the same key it derived at auth
+                        // time. See `derive_e2e_key_if_needed` for the
+                        // key material.
+                        let payload = match &e2e_key {
+                            Some(k) => match zellij_relay_protocol::crypto::encrypt(k, &buf) {
+                                Ok(ct) => ct,
+                                Err(err) => {
+                                    log::error!("e2e encrypt failed: {} — dropping stdin chunk", err);
+                                    continue;
+                                }
+                            },
+                            None => buf,
+                        };
+                        if let Err(e) = connections.terminal_ws.send(Message::Binary(payload)).await {
                             log::error!("Failed to send stdin to terminal WebSocket: {}", e);
                             break;
                         }
@@ -520,6 +544,10 @@ pub async fn run_remote_client_terminal_loop(
             terminal_msg = connections.terminal_ws.next() => {
                 match terminal_msg {
                     Some(Ok(Message::Text(text))) => {
+                        if e2e_key.is_some() {
+                            log::warn!("got plaintext Text frame under E2E — dropping");
+                            continue;
+                        }
                         let mut stdout = os_input.get_stdout_writer();
                         if let Some(sync) = synchronised_output {
                             stdout
@@ -537,6 +565,23 @@ pub async fn run_remote_client_terminal_loop(
                         stdout.flush().expect("could not flush");
                     }
                     Some(Ok(Message::Binary(data))) => {
+                        // With E2E on, the server sends ciphertext as
+                        // Binary. Decrypt into the plaintext ANSI stream
+                        // before writing to stdout.
+                        let decrypted: Vec<u8> = match &e2e_key {
+                            Some(k) => match zellij_relay_protocol::crypto::decrypt(k, &data) {
+                                Ok(pt) => pt,
+                                Err(err) => {
+                                    log::warn!("e2e decrypt failed: {} — dropping frame", err);
+                                    continue;
+                                }
+                            },
+                            None => data,
+                        };
+                        // First clean decrypt under E2E unlocks stdin
+                        // transmission. In the non-E2E path this is a
+                        // no-op — the flag started `true`.
+                        stdin_unlocked = true;
                         let mut stdout = os_input.get_stdout_writer();
                         if let Some(sync) = synchronised_output {
                             stdout
@@ -544,7 +589,7 @@ pub async fn run_remote_client_terminal_loop(
                                 .expect("cannot write to stdout");
                         }
                         stdout
-                            .write_all(&data)
+                            .write_all(&decrypted)
                             .expect("cannot write to stdout");
                         if let Some(sync) = synchronised_output {
                             stdout
@@ -620,6 +665,12 @@ pub async fn run_remote_client_terminal_loop(
     Ok(None)
 }
 
+/// Attach to a remote Zellij session given its URL.
+///
+/// `extra_relay_urls` should carry the local `relay_server_url` config
+/// (if any) plus any other trusted relay URLs. Hosts extracted from
+/// these are appended to the hard-coded `zellij.dev` known-relay list
+/// so self-hosted setups get the same downgrade-refusal treatment.
 #[cfg(feature = "web_server_capability")]
 pub fn start_remote_client(
     mut os_input: Box<dyn ClientOsApi>,
@@ -630,6 +681,7 @@ pub fn start_remote_client(
     ca_cert: Option<std::path::PathBuf>,
     insecure: bool,
     async_worker_tasks: Option<usize>,
+    extra_relay_urls: Vec<String>,
 ) -> Result<Option<ConnectToSession>, RemoteClientError> {
     info!("Starting Zellij client!");
 
@@ -644,6 +696,7 @@ pub fn start_remote_client(
         forget,
         ca_cert.as_deref(),
         insecure,
+        &extra_relay_urls,
     )?;
 
     let reconnect_to_session = None;

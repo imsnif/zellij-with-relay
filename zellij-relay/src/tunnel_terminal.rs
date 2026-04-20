@@ -134,15 +134,11 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, slug: String) {
                     .and_then(|v| v.terminal_sink_tx.clone());
                 match sender {
                     Some(tx) => {
-                        // Match the local web flow: Zellij renders ANSI as
-                        // UTF-8 and sends Message::Text; xterm.js term.write()
-                        // expects a string (Blob frames are silently dropped
-                        // with the default binaryType).
-                        let msg = match String::from_utf8(data) {
-                            Ok(s) => Message::Text(s.into()),
-                            Err(e) => Message::Binary(e.into_bytes().into()),
-                        };
-                        let _ = tx.send(msg);
+                        // Phase 3+: `data` is always opaque bytes. On the
+                        // relay path it is ciphertext; the browser sets
+                        // `binaryType = "arraybuffer"` and decrypts before
+                        // feeding the terminal. Forward as-is.
+                        let _ = tx.send(Message::Binary(data.into()));
                     },
                     None => {
                         tracing::debug!(

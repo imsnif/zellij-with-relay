@@ -4,6 +4,7 @@
 
 import { handleReconnection, handleDisconnected, markConnectionEstablished } from "./connection.js";
 import { getBaseUrl, getWebSocketBaseUrl } from "./utils.js";
+import { encrypt, decrypt } from "./crypto.js";
 
 /**
  * Initialize both terminal and control WebSocket connections
@@ -12,6 +13,7 @@ import { getBaseUrl, getWebSocketBaseUrl } from "./utils.js";
  * @param {Terminal} term - Terminal instance
  * @param {FitAddon} fitAddon - Terminal fit addon
  * @param {function} sendAnsiKey - Function to send ANSI key sequences
+ * @param {?{key: CryptoKey}} e2e - E2E encryption state, or null/undefined for plain
  * @returns {object} Object containing WebSocket instances and cleanup function
  */
 export function initWebSockets(
@@ -19,12 +21,14 @@ export function initWebSockets(
     sessionName,
     term,
     fitAddon,
-    sendAnsiKey
+    sendAnsiKey,
+    e2e
 ) {
     let ownWebClientId = "";
     let wsTerminal;
     let wsControl;
     const userConfig = { blink: false, style: false };
+    const textDecoder = new TextDecoder();
 
     const wsBaseUrl = getWebSocketBaseUrl();
     const url =
@@ -36,20 +40,52 @@ export function initWebSockets(
     const wsTerminalUrl = `${url}${queryString}`;
 
     wsTerminal = new WebSocket(wsTerminalUrl);
+    // With E2E on, the server emits ciphertext as binary frames; default
+    // Blob type would make decryption awkward. With no E2E, binary frames
+    // are never produced, so setting this is safe either way.
+    wsTerminal.binaryType = "arraybuffer";
 
     wsTerminal.onopen = function () {
         markConnectionEstablished();
     };
 
-    wsTerminal.onmessage = function (event) {
+    wsTerminal.onmessage = async function (event) {
+        let data = event.data;
+
+        // Phase 3 client-commitment rule: under E2E, the first STDIN
+        // byte must never be transmitted before we have successfully
+        // decrypted at least one server frame. `ownWebClientId` gates
+        // `sendAnsiKey`, so leave it empty until a clean decrypt.
+        if (e2e) {
+            if (!(data instanceof ArrayBuffer)) {
+                // Under E2E, any Text frame from the server is a
+                // protocol violation: the server always emits Binary
+                // ciphertext. Refuse to activate STDIN.
+                console.error(
+                    "received plaintext frame under E2E; refusing to activate STDIN"
+                );
+                return;
+            }
+            try {
+                const plaintext = await decrypt(e2e.key, data);
+                data = textDecoder.decode(plaintext);
+            } catch (err) {
+                console.error("e2e decrypt failed:", err);
+                return;
+            }
+        }
+
+        // Activate STDIN and the control WS only after the first frame
+        // has arrived (and, under E2E, decrypted cleanly). A decrypt
+        // failure or protocol violation above returned early without
+        // setting `ownWebClientId`, so a second chance is available
+        // when the next frame arrives.
         if (ownWebClientId == "") {
             ownWebClientId = webClientId;
             const wsControlUrl = `${wsBaseUrl}/ws/control`;
             wsControl = new WebSocket(wsControlUrl);
             startWsControl(wsControl, term, fitAddon, ownWebClientId, userConfig);
         }
-
-        let data = event.data;
 
         if (typeof data === "string") {
             // Handle ANSI title change sequences
@@ -103,12 +139,36 @@ export function initWebSockets(
         }
     };
 
-    // Update sendAnsiKey to use the actual WebSocket
+    // Update sendAnsiKey to use the actual WebSocket.
+    // With E2E on, encrypt every outbound payload. xterm emits strings
+    // via term.onData and Uint8Arrays via term.onBinary (see input.js);
+    // we handle both.
     const originalSendAnsiKey = sendAnsiKey;
-    sendAnsiKey = (ansiKey) => {
-        if (ownWebClientId !== "") {
-            wsTerminal.send(ansiKey);
+    sendAnsiKey = async (ansiKey) => {
+        if (ownWebClientId === "") {
+            return;
         }
+        if (e2e) {
+            let bytes;
+            if (typeof ansiKey === "string") {
+                bytes = new TextEncoder().encode(ansiKey);
+            } else if (ansiKey instanceof Uint8Array) {
+                bytes = ansiKey;
+            } else if (ansiKey instanceof ArrayBuffer) {
+                bytes = new Uint8Array(ansiKey);
+            } else {
+                console.error("sendAnsiKey: unsupported payload type", ansiKey);
+                return;
+            }
+            try {
+                const ct = await encrypt(e2e.key, bytes);
+                wsTerminal.send(ct);
+            } catch (err) {
+                console.error("e2e encrypt failed:", err);
+            }
+            return;
+        }
+        wsTerminal.send(ansiKey);
     };
 
     // Setup resize handler

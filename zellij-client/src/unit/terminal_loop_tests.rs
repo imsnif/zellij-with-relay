@@ -360,8 +360,9 @@ async fn test_stdin_forwarded_to_terminal_websocket() {
     let os_input = Box::new(TestClientOsApi::new(stdin_rx, signal_rx));
 
     // Spawn the async loop
+    let attached = crate::remote_attach::AttachedSession::plain(connections);
     let loop_handle =
-        tokio::spawn(async move { run_remote_client_terminal_loop(os_input, connections).await });
+        tokio::spawn(async move { run_remote_client_terminal_loop(os_input, attached).await });
 
     // Send stdin data
     let test_data = b"hello from stdin\n".to_vec();
@@ -432,8 +433,9 @@ async fn test_terminal_output_written_to_stdout() {
     let stdout_buffer = os_input.stdout_buffer.clone();
     let os_input = Box::new(os_input);
 
+    let attached = crate::remote_attach::AttachedSession::plain(connections);
     let loop_handle =
-        tokio::spawn(async move { run_remote_client_terminal_loop(os_input, connections).await });
+        tokio::spawn(async move { run_remote_client_terminal_loop(os_input, attached).await });
 
     // Send terminal output from server
     let test_output = "Hello from terminal";
@@ -505,8 +507,9 @@ async fn test_resize_signal_sends_control_message() {
 
     let os_input = Box::new(TestClientOsApi::new(stdin_rx, signal_rx));
 
+    let attached = crate::remote_attach::AttachedSession::plain(connections);
     let loop_handle =
-        tokio::spawn(async move { run_remote_client_terminal_loop(os_input, connections).await });
+        tokio::spawn(async move { run_remote_client_terminal_loop(os_input, attached).await });
 
     // Wait for initial resize message to be sent on startup
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -596,8 +599,9 @@ async fn test_quit_signal_exits_loop() {
 
     let os_input = Box::new(TestClientOsApi::new(stdin_rx, signal_rx));
 
+    let attached = crate::remote_attach::AttachedSession::plain(connections);
     let loop_handle =
-        tokio::spawn(async move { run_remote_client_terminal_loop(os_input, connections).await });
+        tokio::spawn(async move { run_remote_client_terminal_loop(os_input, attached).await });
 
     // Send quit signal
     signal_tx.send(SignalEvent::Quit).unwrap();
@@ -651,8 +655,9 @@ async fn test_websocket_close_exits_loop() {
 
     let os_input = Box::new(TestClientOsApi::new(stdin_rx, signal_rx));
 
+    let attached = crate::remote_attach::AttachedSession::plain(connections);
     let loop_handle =
-        tokio::spawn(async move { run_remote_client_terminal_loop(os_input, connections).await });
+        tokio::spawn(async move { run_remote_client_terminal_loop(os_input, attached).await });
 
     // Send close message
     server
@@ -711,8 +716,9 @@ async fn test_control_message_handling() {
     let terminal_size = os_input.terminal_size;
     let os_input = Box::new(os_input);
 
+    let attached = crate::remote_attach::AttachedSession::plain(connections);
     let loop_handle =
-        tokio::spawn(async move { run_remote_client_terminal_loop(os_input, connections).await });
+        tokio::spawn(async move { run_remote_client_terminal_loop(os_input, attached).await });
 
     // Wait for initial resize message to be sent on startup
     tokio::time::sleep(Duration::from_millis(200)).await;

@@ -37,12 +37,18 @@ message AuthChallenge {
 }
 
 // Zellij → Relay: result of an AuthChallenge.
+//
+// `e2e_encrypted` tells the relay (and, via `/session`, the viewer) whether
+// the Zellij side will encrypt the TerminalFrameData payloads it sends for
+// this client. Relay-path viewers always see `true` in Phase 3+; local-web
+// viewers see `true` only when the sharer opted in via `encrypt_web_sharing`.
 message AuthResponse {
   bytes request_id = 1;
   uint32 client_id = 2;
   bool accepted = 3;
   bool is_read_only = 4;
   string session_token_hash = 5;
+  bool e2e_encrypted = 6;
 }
 
 // Relay → Zellij: a new viewer has attached to the tunnel.

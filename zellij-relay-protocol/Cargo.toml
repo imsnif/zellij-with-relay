@@ -11,3 +11,8 @@ include = ["src/**/*", "assets/"]
 anyhow = { workspace = true }
 prost = { workspace = true }
 serde = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+aes-gcm = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
