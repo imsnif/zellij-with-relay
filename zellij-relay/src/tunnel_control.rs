@@ -92,6 +92,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         pending_auths: Mutex::new(HashMap::new()),
         viewers: Mutex::new(HashMap::new()),
         sessions: Mutex::new(HashMap::new()),
+        client_id_to_viewer: Mutex::new(HashMap::new()),
+        ro_groups: Mutex::new(HashMap::new()),
+        client_id_to_token_hash: Mutex::new(HashMap::new()),
     });
     state.registry.insert(entry.clone());
     tracing::info!(%slug, %tunnel_id, %session_name, "tunnel established");
@@ -171,43 +174,71 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 }
             },
             ControlMessage::ControlFrameData { client_id, data } => {
-                let sender = reader_entry
-                    .viewers
-                    .lock()
-                    .unwrap()
-                    .get(&client_id)
-                    .and_then(|v| v.control_sink_tx.clone());
-                match sender {
-                    Some(tx) => {
-                        let text = match std::str::from_utf8(&data) {
-                            Ok(s) => s.to_owned(),
-                            Err(_) => {
-                                tracing::warn!(
-                                    client_id,
-                                    "ControlFrameData from Zellij is not UTF-8, dropping"
-                                );
-                                continue;
-                            },
-                        };
-                        let _ = tx.send(Message::Text(text.into()));
-                    },
-                    None => {
-                        tracing::debug!(
-                            slug = %reader_entry.slug,
+                let text = match std::str::from_utf8(&data) {
+                    Ok(s) => s.to_owned(),
+                    Err(_) => {
+                        tracing::warn!(
                             client_id,
-                            "ControlFrameData for unknown client_id, dropping"
+                            "ControlFrameData from Zellij is not UTF-8, dropping"
                         );
+                        continue;
                     },
+                };
+                let viewer_ids = reader_entry.viewers_for_client_id(client_id);
+                if viewer_ids.is_empty() {
+                    tracing::debug!(
+                        slug = %reader_entry.slug,
+                        client_id,
+                        "ControlFrameData for unknown client_id, dropping"
+                    );
+                    continue;
+                }
+                let viewers = reader_entry.viewers.lock().unwrap();
+                for vid in viewer_ids {
+                    if let Some(handle) = viewers.get(&vid) {
+                        if let Some(tx) = &handle.control_sink_tx {
+                            let _ = tx.send(Message::Text(text.clone().into()));
+                        }
+                    }
                 }
             },
             ControlMessage::ClientDisconnected { client_id } => {
-                let handle = reader_entry.viewers.lock().unwrap().remove(&client_id);
-                if let Some(mut handle) = handle {
-                    if let Some(tx) = handle.disconnect_terminal.take() {
-                        let _ = tx.send(());
+                // Locate the viewer(s) this `client_id` addresses — r/w
+                // (single viewer) or r/o group (all viewers) — then tear
+                // each of them down through the usual disconnect path.
+                let viewer_ids = reader_entry.viewers_for_client_id(client_id);
+                // For r/o, also drop the cached group so the next viewer
+                // re-challenges rather than joining a zombie group.
+                if let Some(token_hash) = reader_entry
+                    .client_id_to_token_hash
+                    .lock()
+                    .unwrap()
+                    .remove(&client_id)
+                {
+                    if let Some(group) = reader_entry
+                        .ro_groups
+                        .lock()
+                        .unwrap()
+                        .get_mut(&token_hash)
+                    {
+                        group.active_client_id = None;
+                        group.viewer_ids.clear();
                     }
-                    if let Some(tx) = handle.disconnect_control.take() {
-                        let _ = tx.send(());
+                }
+                reader_entry
+                    .client_id_to_viewer
+                    .lock()
+                    .unwrap()
+                    .remove(&client_id);
+                let mut viewers = reader_entry.viewers.lock().unwrap();
+                for vid in viewer_ids {
+                    if let Some(mut handle) = viewers.remove(&vid) {
+                        if let Some(tx) = handle.disconnect_terminal.take() {
+                            let _ = tx.send(());
+                        }
+                        if let Some(tx) = handle.disconnect_control.take() {
+                            let _ = tx.send(());
+                        }
                     }
                 }
             },

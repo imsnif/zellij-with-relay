@@ -87,6 +87,12 @@ pub struct ConnectionTable {
     /// `encrypt_web_sharing` opt-in is on. Absent means plaintext.
     /// Using `[u8; 32]` (AES-256) directly to avoid another dep.
     pub client_e2e_key: HashMap<String, [u8; 32]>,
+    /// True when the client is a virtual watcher backing a relay r/o
+    /// fan-out group. Causes the first-message path to emit
+    /// `AttachRelayWatcherClient` so the server registers the watcher at
+    /// the current session viewport size rather than the viewer-reported
+    /// terminal size.
+    pub client_relay_fanout_status: HashMap<String, bool>,
 }
 
 #[derive(Debug, Clone)]

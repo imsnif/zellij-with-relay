@@ -59,6 +59,8 @@ pub async fn start_relay_tunnel(
         terminal_tunnel_tx,
         tunnel_id: tunnel_id.clone(),
         pending_e2e_keys: Mutex::new(Default::default()),
+        pending_read_only: Mutex::new(Default::default()),
+        token_hash_to_client_id: Mutex::new(Default::default()),
         session_name,
         connection_table,
         os_api_factory,

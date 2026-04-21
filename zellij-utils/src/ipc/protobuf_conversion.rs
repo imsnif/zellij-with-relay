@@ -1,7 +1,8 @@
 use crate::{
     client_server_contract::client_server_contract::{
         client_to_server_msg, server_to_client_msg, ActionMsg, AttachClientMsg,
-        AttachWatcherClientMsg, BackgroundColorMsg, CliPipeOutputMsg, ClientExitedMsg,
+        AttachRelayWatcherClientMsg, AttachWatcherClientMsg, BackgroundColorMsg, CliPipeOutputMsg,
+        ClientExitedMsg,
         ClientToServerMsg as ProtoClientToServerMsg, ColorRegistersMsg, ConfigFileUpdatedMsg,
         ConnStatusMsg, ConnectedMsg, DesktopNotificationResponseMsg, DetachSessionMsg, ExitMsg,
         ExitReason as ProtoExitReason, FailedToStartWebServerMsg, FirstClientConnectedMsg,
@@ -81,6 +82,11 @@ impl From<ClientToServerMsg> for ProtoClientToServerMsg {
                 terminal_size: Some(terminal_size.into()),
                 is_web_client,
             }),
+            ClientToServerMsg::AttachRelayWatcherClient { is_web_client } => {
+                client_to_server_msg::Message::AttachRelayWatcherClient(
+                    AttachRelayWatcherClientMsg { is_web_client },
+                )
+            },
             ClientToServerMsg::Action {
                 action,
                 terminal_id,
@@ -227,6 +233,11 @@ impl TryFrom<ProtoClientToServerMsg> for ClientToServerMsg {
                         .ok_or_else(|| anyhow::anyhow!("Missing terminal_size"))?
                         .try_into()?,
                     is_web_client: attach_watcher.is_web_client,
+                })
+            },
+            Some(client_to_server_msg::Message::AttachRelayWatcherClient(attach_relay)) => {
+                Ok(ClientToServerMsg::AttachRelayWatcherClient {
+                    is_web_client: attach_relay.is_web_client,
                 })
             },
             Some(client_to_server_msg::Message::Action(action)) => Ok(ClientToServerMsg::Action {

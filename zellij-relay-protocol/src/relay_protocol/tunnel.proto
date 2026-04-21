@@ -77,6 +77,14 @@ message TerminalFrameData {
   bytes data = 2;
 }
 
+// Relay → Zellij: current number of r/o viewers in a fan-out group for a
+// given token hash. `count == 0` signals the group has become dormant and the
+// virtual watcher may be torn down.
+message ReadOnlyViewerUpdate {
+  string token_hash = 1;
+  uint32 count = 2;
+}
+
 // Envelope for all control-tunnel messages. All Phase 1 messages that travel
 // on the control tunnel are wrapped in this oneof so that Phase 2+ can add
 // variants (AuthChallenge, ClientConnected, ControlFrame, ...) without
@@ -91,6 +99,8 @@ message ControlFrame {
     ClientConnected client_connected = 6;
     ClientDisconnected client_disconnected = 7;
     ControlFrameData control_frame_data = 8;
+    ReadOnlyViewerUpdate read_only_viewer_update = 9;
+    // tag 10 reserved for SessionSize (D3)
   }
 }
 

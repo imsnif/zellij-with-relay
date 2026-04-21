@@ -250,6 +250,36 @@ fn control_frame_data_roundtrip() {
 }
 
 #[test]
+fn read_only_viewer_update_zero_count_roundtrip() {
+    let original = ControlMessage::ReadOnlyViewerUpdate {
+        token_hash: "deadbeef".into(),
+        count: 0,
+    };
+    match decode_control_frame(&original.encode()).unwrap() {
+        ControlMessage::ReadOnlyViewerUpdate { token_hash, count } => {
+            assert_eq!(token_hash, "deadbeef");
+            assert_eq!(count, 0);
+        },
+        other => panic!("expected ReadOnlyViewerUpdate, got {:?}", other),
+    }
+}
+
+#[test]
+fn read_only_viewer_update_positive_count_roundtrip() {
+    let original = ControlMessage::ReadOnlyViewerUpdate {
+        token_hash: "cafebabe".into(),
+        count: 17,
+    };
+    match decode_control_frame(&original.encode()).unwrap() {
+        ControlMessage::ReadOnlyViewerUpdate { token_hash, count } => {
+            assert_eq!(token_hash, "cafebabe");
+            assert_eq!(count, 17);
+        },
+        other => panic!("expected ReadOnlyViewerUpdate, got {:?}", other),
+    }
+}
+
+#[test]
 fn terminal_frame_data_roundtrip() {
     let original = TerminalMessage::TerminalFrameData {
         client_id: 11,

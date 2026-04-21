@@ -2997,6 +2997,16 @@ pub struct AttachWatcherClientMsg {
     #[prost(bool, tag="2")]
     pub is_web_client: bool,
 }
+/// Attach the client as a virtual watcher proxied through the relay for r/o
+/// fan-out. The relay already has an established tunnel so the terminal size
+/// is not negotiated here — the server registers the watcher at the current
+/// session viewport size.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AttachRelayWatcherClientMsg {
+    #[prost(bool, tag="1")]
+    pub is_web_client: bool,
+}
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ActionMsg {

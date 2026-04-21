@@ -36,6 +36,18 @@ impl ConnectionTable {
             .unwrap_or(false)
     }
 
+    pub fn set_client_relay_fanout(&mut self, client_id: &str, is_relay_fanout: bool) {
+        self.client_relay_fanout_status
+            .insert(client_id.to_string(), is_relay_fanout);
+    }
+
+    pub fn is_client_relay_fanout(&self, client_id: &str) -> bool {
+        self.client_relay_fanout_status
+            .get(client_id)
+            .copied()
+            .unwrap_or(false)
+    }
+
     pub fn add_client_control_tx(
         &mut self,
         client_id: &str,
@@ -89,6 +101,7 @@ impl ConnectionTable {
         self.client_read_only_status.remove(client_id);
         self.client_session_token_hash.remove(client_id);
         self.client_e2e_key.remove(client_id);
+        self.client_relay_fanout_status.remove(client_id);
     }
 
     /// Store the per-client AES-256 key used by the local web path when

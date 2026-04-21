@@ -104,6 +104,7 @@ pub enum ServerInstruction {
         ClientId,
     ),
     AttachWatcherClient(ClientId, Size, bool), // bool -> is_web_client
+    AttachRelayWatcherClient(ClientId, bool),  // bool -> is_web_client
     ConnStatus(ClientId),
     Log(Vec<String>, ClientId, Option<NotificationEnd>),
     LogError(Vec<String>, ClientId, Option<NotificationEnd>),
@@ -162,6 +163,7 @@ impl From<&ServerInstruction> for ServerContext {
             ServerInstruction::DetachSession(..) => ServerContext::DetachSession,
             ServerInstruction::AttachClient(..) => ServerContext::AttachClient,
             ServerInstruction::AttachWatcherClient(..) => ServerContext::AttachClient,
+            ServerInstruction::AttachRelayWatcherClient(..) => ServerContext::AttachClient,
             ServerInstruction::ConnStatus(..) => ServerContext::ConnStatus,
             ServerInstruction::Log(..) => ServerContext::Log,
             ServerInstruction::LogError(..) => ServerContext::LogError,
@@ -1225,6 +1227,23 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                         client_id,
                         terminal_size,
                     ))
+                    .unwrap();
+            },
+            ServerInstruction::AttachRelayWatcherClient(client_id, is_web_client) => {
+                // Virtual watcher for a relay r/o fan-out group. The terminal size
+                // follows the current session viewport; Screen applies that itself.
+                session_state
+                    .write()
+                    .unwrap()
+                    .convert_client_to_watcher(client_id, is_web_client);
+
+                session_data
+                    .write()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .senders
+                    .send_to_screen(ScreenInstruction::AddRelayWatcherClient(client_id))
                     .unwrap();
             },
             ServerInstruction::UnblockInputThread => {

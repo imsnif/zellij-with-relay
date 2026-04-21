@@ -126,27 +126,37 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, slug: String) {
 
         match msg {
             TerminalMessage::TerminalFrameData { client_id, data } => {
-                let sender = entry
-                    .viewers
-                    .lock()
-                    .unwrap()
-                    .get(&client_id)
-                    .and_then(|v| v.terminal_sink_tx.clone());
-                match sender {
-                    Some(tx) => {
-                        // Phase 3+: `data` is always opaque bytes. On the
-                        // relay path it is ciphertext; the browser sets
-                        // `binaryType = "arraybuffer"` and decrypts before
-                        // feeding the terminal. Forward as-is.
-                        let _ = tx.send(Message::Binary(data.into()));
-                    },
-                    None => {
-                        tracing::debug!(
-                            slug = %entry.slug,
-                            client_id,
-                            "TerminalFrameData for unknown client_id, dropping"
-                        );
-                    },
+                let viewer_ids = entry.viewers_for_client_id(client_id);
+                if viewer_ids.is_empty() {
+                    tracing::debug!(
+                        slug = %entry.slug,
+                        client_id,
+                        "TerminalFrameData for unknown client_id, dropping"
+                    );
+                    continue;
+                }
+                // Phase 3+: `data` is always opaque bytes. On the relay
+                // path it is ciphertext; the browser sets
+                // `binaryType = "arraybuffer"` and decrypts before feeding
+                // the terminal. Forward as-is. Phase 4: fan out the same
+                // bytes to every viewer when `client_id` addresses an r/o
+                // group — the relay performs a memcpy per viewer and
+                // never decrypts.
+                let viewers = entry.viewers.lock().unwrap();
+                if viewer_ids.len() == 1 {
+                    if let Some(handle) = viewers.get(&viewer_ids[0]) {
+                        if let Some(tx) = &handle.terminal_sink_tx {
+                            let _ = tx.send(Message::Binary(data.into()));
+                        }
+                    }
+                } else {
+                    for vid in viewer_ids {
+                        if let Some(handle) = viewers.get(&vid) {
+                            if let Some(tx) = &handle.terminal_sink_tx {
+                                let _ = tx.send(Message::Binary(data.clone().into()));
+                            }
+                        }
+                    }
                 }
             },
             TerminalMessage::Error { message } => {
