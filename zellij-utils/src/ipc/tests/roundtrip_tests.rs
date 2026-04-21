@@ -3718,6 +3718,11 @@ fn test_server_messages() {
         token: u32::MAX,
         query_bytes: (0u8..=255u8).collect(),
     });
+    test_server_roundtrip!(ServerToClientMsg::SessionSize {
+        rows: 40,
+        cols: 120,
+    });
+    test_server_roundtrip!(ServerToClientMsg::SessionSize { rows: 0, cols: 0 });
 }
 
 #[test]

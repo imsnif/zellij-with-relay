@@ -40,10 +40,16 @@ pub async fn serve_html(State(state): State<AppState>, request: Request) -> Html
         "false"
     };
 
+    // Local web clients are not relay-fan-out viewers, so the clipper is
+    // never instantiated. Stamp sentinels; the /session JSON is
+    // authoritative.
     let html = Html(
         zellij_web_client_assets::INDEX_HTML
             .replace("IS_AUTHENTICATED", &format!("{}", auth_value))
             .replace("EXPECTED_E2E", expected_e2e)
+            .replace("IS_READ_ONLY", "false")
+            .replace("SESSION_ROWS", "0")
+            .replace("SESSION_COLS", "0")
             .replace("BASE_URL", &base_url),
     );
     html
@@ -166,6 +172,8 @@ pub async fn create_new_client(
         is_read_only,
         e2e_encrypted,
         tunnel_id: state.local_tunnel_id.clone(),
+        session_rows: 0,
+        session_cols: 0,
     }))
 }
 

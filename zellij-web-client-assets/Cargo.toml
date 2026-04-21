@@ -9,3 +9,10 @@ include = ["src/**/*", "assets/**/*"]
 
 [dependencies]
 include_dir = { workspace = true }
+
+[features]
+# When set, `lookup("clip.wasm")` resolves against the live build artifact at
+# `target/wasm32-unknown-unknown/release/zellij_ansi_clip.wasm` instead of the
+# committed bundle under `assets/`. Useful during iteration — avoids a commit
+# after every edit to `zellij-ansi-clip`.
+clip_wasm_from_target = []

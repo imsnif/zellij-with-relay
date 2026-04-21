@@ -1951,7 +1951,7 @@ pub struct Options {
     pub theme_light: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag="48")]
     pub relay_server_url: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(bool, optional, tag="47")]
+    #[prost(bool, optional, tag="49")]
     pub encrypt_web_sharing: ::core::option::Option<bool>,
 }
 /// Pane-targeting action messages
@@ -2883,7 +2883,7 @@ impl WebSharing {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ClientToServerMsg {
-    #[prost(oneof="client_to_server_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20")]
+    #[prost(oneof="client_to_server_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21")]
     pub message: ::core::option::Option<client_to_server_msg::Message>,
 }
 /// Nested message and enum types in `ClientToServerMsg`.
@@ -2931,6 +2931,8 @@ pub mod client_to_server_msg {
         ForwardedReplyFromHost(super::ForwardedReplyFromHostMsg),
         #[prost(message, tag="20")]
         HostTerminalThemeChanged(super::HostTerminalThemeChangedMsg),
+        #[prost(message, tag="21")]
+        AttachRelayWatcherClient(super::AttachRelayWatcherClientMsg),
     }
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -3115,7 +3117,7 @@ impl HostTerminalThemeIndication {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClientMsg {
-    #[prost(oneof="server_to_client_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16")]
+    #[prost(oneof="server_to_client_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17")]
     pub message: ::core::option::Option<server_to_client_msg::Message>,
 }
 /// Nested message and enum types in `ServerToClientMsg`.
@@ -3155,6 +3157,8 @@ pub mod server_to_client_msg {
         SubscribedPaneClosed(super::SubscribedPaneClosedMsg),
         #[prost(message, tag="16")]
         ForwardQueryToHost(super::ForwardQueryToHostMsg),
+        #[prost(message, tag="17")]
+        SessionSize(super::SessionSizeMsg),
     }
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -3261,4 +3265,14 @@ pub struct ForwardQueryToHostMsg {
     pub token: u32,
     #[prost(bytes="vec", tag="2")]
     pub query_bytes: ::prost::alloc::vec::Vec<u8>,
+}
+/// Delivered to relay-fan-out virtual watchers so the multiplexer can push
+/// the current session-viewport size out to the relay.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SessionSizeMsg {
+    #[prost(uint32, tag="1")]
+    pub rows: u32,
+    #[prost(uint32, tag="2")]
+    pub cols: u32,
 }

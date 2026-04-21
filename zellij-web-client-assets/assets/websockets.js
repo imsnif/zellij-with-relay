@@ -5,6 +5,7 @@
 import { handleReconnection, handleDisconnected, markConnectionEstablished } from "./connection.js";
 import { getBaseUrl, getWebSocketBaseUrl } from "./utils.js";
 import { encrypt, decrypt } from "./crypto.js";
+import { createClipper } from "./clip.js";
 
 /**
  * Initialize both terminal and control WebSocket connections
@@ -14,6 +15,9 @@ import { encrypt, decrypt } from "./crypto.js";
  * @param {FitAddon} fitAddon - Terminal fit addon
  * @param {function} sendAnsiKey - Function to send ANSI key sequences
  * @param {?{key: CryptoKey}} e2e - E2E encryption state, or null/undefined for plain
+ * @param {?{isReadOnly: boolean, sessionRows: number, sessionCols: number}} roViewer
+ *   Populated for relay r/o viewers. Triggers client-side clipping + resize
+ *   suppression; ignored when `isReadOnly` is false.
  * @returns {object} Object containing WebSocket instances and cleanup function
  */
 export function initWebSockets(
@@ -22,13 +26,42 @@ export function initWebSockets(
     term,
     fitAddon,
     sendAnsiKey,
-    e2e
+    e2e,
+    roViewer
 ) {
     let ownWebClientId = "";
     let wsTerminal;
     let wsControl;
     const userConfig = { blink: false, style: false };
     const textDecoder = new TextDecoder();
+    const textEncoder = new TextEncoder();
+
+    const isReadOnly = !!(roViewer && roViewer.isReadOnly);
+    let clipper = null;
+    const pendingFrames = [];
+    let clipperReady = false;
+
+    if (isReadOnly) {
+        const baseUrl = `${getBaseUrl()}/`;
+        // 0 sentinels mean "session size not yet known at login time" —
+        // use a reasonable default and let the first `SessionSizeChanged`
+        // control message overwrite.
+        const initialRows = roViewer.sessionRows || 24;
+        const initialCols = roViewer.sessionCols || 80;
+        createClipper(baseUrl, initialRows, initialCols)
+            .then((c) => {
+                clipper = c;
+                clipperReady = true;
+                for (const buf of pendingFrames) {
+                    clipper.apply(buf);
+                }
+                pendingFrames.length = 0;
+                term.write(clipper.emit(term.rows, term.cols));
+            })
+            .catch((err) => {
+                console.error("clip.wasm load failed:", err);
+            });
+    }
 
     const wsBaseUrl = getWebSocketBaseUrl();
     const url =
@@ -51,6 +84,9 @@ export function initWebSockets(
 
     wsTerminal.onmessage = async function (event) {
         let data = event.data;
+        // Under r/o, keep the raw plaintext bytes separately so they can
+        // feed the clipper directly (avoids a UTF-8 round-trip).
+        let roPlaintext = null;
 
         // Phase 3 client-commitment rule: under E2E, the first STDIN
         // byte must never be transmitted before we have successfully
@@ -68,10 +104,19 @@ export function initWebSockets(
             }
             try {
                 const plaintext = await decrypt(e2e.key, data);
+                if (isReadOnly) {
+                    roPlaintext = new Uint8Array(plaintext);
+                }
                 data = textDecoder.decode(plaintext);
             } catch (err) {
                 console.error("e2e decrypt failed:", err);
                 return;
+            }
+        } else if (isReadOnly) {
+            if (data instanceof ArrayBuffer) {
+                roPlaintext = new Uint8Array(data);
+            } else if (typeof data === "string") {
+                roPlaintext = textEncoder.encode(data);
             }
         }
 
@@ -84,7 +129,30 @@ export function initWebSockets(
             ownWebClientId = webClientId;
             const wsControlUrl = `${wsBaseUrl}/ws/control`;
             wsControl = new WebSocket(wsControlUrl);
-            startWsControl(wsControl, term, fitAddon, ownWebClientId, userConfig);
+            startWsControl(
+                wsControl,
+                term,
+                fitAddon,
+                ownWebClientId,
+                userConfig,
+                isReadOnly,
+                () => clipper
+            );
+        }
+
+        if (isReadOnly && roPlaintext) {
+            // Route the raw server-serialized ANSI stream through the
+            // clipper. xterm gets a freshly re-emitted stream sized to
+            // the viewer's viewport — no network traffic on local
+            // resize (see `setupResizeHandler`) and no passthrough of
+            // title/cursor sequences since the clipper normalises them.
+            if (!clipperReady) {
+                pendingFrames.push(roPlaintext);
+                return;
+            }
+            clipper.apply(roPlaintext);
+            term.write(clipper.emit(term.rows, term.cols));
+            return;
         }
 
         if (typeof data === "string") {
@@ -148,6 +216,11 @@ export function initWebSockets(
         if (ownWebClientId === "") {
             return;
         }
+        if (isReadOnly) {
+            // Relay drops r/o input at its side; belt-and-braces — never
+            // transmit anything from this viewer.
+            return;
+        }
         if (e2e) {
             let bytes;
             if (typeof ansiKey === "string") {
@@ -176,7 +249,9 @@ export function initWebSockets(
         term,
         fitAddon,
         () => wsControl,
-        () => ownWebClientId
+        () => ownWebClientId,
+        isReadOnly,
+        () => clipper
     );
 
     return {
@@ -202,8 +277,22 @@ export function initWebSockets(
  * @param {FitAddon} fitAddon - Terminal fit addon
  * @param {string} ownWebClientId - Own web client ID
  */
-function startWsControl(wsControl, term, fitAddon, ownWebClientId, userConfig) {
+function startWsControl(
+    wsControl,
+    term,
+    fitAddon,
+    ownWebClientId,
+    userConfig,
+    isReadOnly,
+    getClipper
+) {
     wsControl.onopen = function (event) {
+        if (isReadOnly) {
+            // r/o viewers never negotiate a viewport with the server —
+            // session size flows the other direction via the
+            // `SessionSizeChanged` control message.
+            return;
+        }
         const fitDimensions = fitAddon.proposeDimensions();
         const { rows, cols } = fitDimensions;
         wsControl.send(
@@ -263,32 +352,41 @@ function startWsControl(wsControl, term, fitAddon, ownWebClientId, userConfig) {
             }
             term.resize(cols, rows);
 
-            wsControl.send(
-                JSON.stringify({
-                    web_client_id: ownWebClientId,
-                    payload: {
-                        type: "TerminalResize",
-                        rows,
-                        cols,
-                    },
-                })
-            );
+            if (!isReadOnly) {
+                wsControl.send(
+                    JSON.stringify({
+                        web_client_id: ownWebClientId,
+                        payload: {
+                            type: "TerminalResize",
+                            rows,
+                            cols,
+                        },
+                    })
+                );
+            } else {
+                const clipper = getClipper ? getClipper() : null;
+                if (clipper) {
+                    term.write(clipper.emit(rows, cols));
+                }
+            }
         } else if (msg.type === "QueryTerminalSize") {
             const fitDimensions = fitAddon.proposeDimensions();
             const { rows, cols } = fitDimensions;
             if (rows !== term.rows || cols !== term.cols) {
                 term.resize(cols, rows);
             }
-            wsControl.send(
-                JSON.stringify({
-                    web_client_id: ownWebClientId,
-                    payload: {
-                        type: "TerminalResize",
-                        rows,
-                        cols,
-                    },
-                })
-            );
+            if (!isReadOnly) {
+                wsControl.send(
+                    JSON.stringify({
+                        web_client_id: ownWebClientId,
+                        payload: {
+                            type: "TerminalResize",
+                            rows,
+                            cols,
+                        },
+                    })
+                );
+            }
         } else if (msg.type === "Log") {
             const { lines } = msg;
             for (const line in lines) {
@@ -303,6 +401,15 @@ function startWsControl(wsControl, term, fitAddon, ownWebClientId, userConfig) {
             const { new_session_name } = msg;
             const baseUrl = getBaseUrl();
             window.location.href = `${baseUrl}/${encodeURIComponent(new_session_name)}`;
+        } else if (msg.type === "SessionSizeChanged") {
+            // Relay-forwarded sharer-side resize. Update the clipper's
+            // session grid and re-emit at the viewer's viewport so the
+            // terminal paints the new layout in one cycle.
+            const clipper = getClipper ? getClipper() : null;
+            if (clipper) {
+                clipper.resizeSession(Number(msg.rows) || 0, Number(msg.cols) || 0);
+                term.write(clipper.emit(term.rows, term.cols));
+            }
         }
     };
 
@@ -326,7 +433,9 @@ export function setupResizeHandler(
     term,
     fitAddon,
     getWsControl,
-    getOwnWebClientId
+    getOwnWebClientId,
+    isReadOnly,
+    getClipper
 ) {
     let resizeScheduled = false;
 
@@ -357,6 +466,16 @@ export function setupResizeHandler(
         }
 
         term.resize(cols, rows);
+
+        if (isReadOnly) {
+            // Pure client-side re-clip. The sharer's session viewport
+            // has not changed; only our cut of it has.
+            const clipper = getClipper ? getClipper() : null;
+            if (clipper) {
+                term.write(clipper.emit(rows, cols));
+            }
+            return;
+        }
 
         const wsControl = getWsControl();
         if (wsControl) {

@@ -63,6 +63,12 @@ pub struct SessionResponse {
     /// browser recomputes the same key locally from this value + its
     /// typed raw auth token's SHA-256 hash.
     pub tunnel_id: String,
+    /// Sharer-side session viewport, used by r/o viewers to initialise
+    /// the client-side clipper. `0` when not yet known (r/w viewers or
+    /// r/o joins before the first `SessionSize` tunnel frame); the
+    /// browser then waits for a `SessionSizeChanged` control message.
+    pub session_rows: u32,
+    pub session_cols: u32,
 }
 
 fn hash_auth_token(token: &str) -> String {
@@ -73,6 +79,24 @@ fn hash_auth_token(token: &str) -> String {
 
 fn virtual_web_client_id(client_id: u32) -> String {
     format!("relay-client-{}", client_id)
+}
+
+/// Look up the cached session viewport for a viewer's routing. For r/o
+/// viewers this pulls from the fan-out group's `session_size`; for r/w
+/// viewers (and r/o viewers whose group has not yet received a
+/// `SessionSize` tunnel frame) it returns `(0, 0)` and the browser
+/// lazy-updates via the first `SessionSizeChanged` JSON push.
+fn session_size_for(entry: &std::sync::Arc<TunnelEntry>, session: &ViewerSession) -> (u32, u32) {
+    match &session.routing {
+        ViewerRouting::Rw(_) => (0, 0),
+        ViewerRouting::Ro(token_hash) => entry
+            .ro_groups
+            .lock()
+            .unwrap()
+            .get(token_hash)
+            .and_then(|g| g.session_size)
+            .unwrap_or((0, 0)),
+    }
 }
 
 fn uniform_unauthorised() -> Response {
@@ -93,9 +117,17 @@ pub async fn serve_html(
     // same string is served for valid and unknown slugs — enumeration
     // safety is preserved because the encryption-state claim is a global
     // policy, not per-slug information.
+    //
+    // IS_READ_ONLY / SESSION_ROWS / SESSION_COLS cannot be known at first
+    // paint (the viewer has not presented a token yet), so stamp sentinels
+    // and let the viewer JS populate real values from the /session response
+    // and from subsequent `SessionSizeChanged` control messages.
     let html = zellij_web_client_assets::INDEX_HTML
         .replace("IS_AUTHENTICATED", "false")
         .replace("EXPECTED_E2E", "true")
+        .replace("IS_READ_ONLY", "false")
+        .replace("SESSION_ROWS", "0")
+        .replace("SESSION_COLS", "0")
         .replace("BASE_URL", &base_url);
     Html(html)
 }
@@ -151,6 +183,7 @@ fn finalise_ro_first(
             active_client_id: Some(client_id),
             e2e_encrypted,
             viewer_ids,
+            session_size: None,
         },
     );
     entry
@@ -430,12 +463,15 @@ pub async fn post_session(
                 .and_then(|g| g.active_client_id)
                 .unwrap_or(0),
         };
+        let (session_rows, session_cols) = session_size_for(&entry, &session);
         let body = SessionResponse {
             web_client_id: virtual_web_client_id(client_id),
             client_id,
             is_read_only: session.is_read_only,
             e2e_encrypted: session.e2e_encrypted,
             tunnel_id: entry.tunnel_id.to_string(),
+            session_rows,
+            session_cols,
         };
         return Json(body).into_response();
     }
@@ -459,12 +495,15 @@ pub async fn post_session(
             session,
             client_id,
         }) => {
+            let (session_rows, session_cols) = session_size_for(&entry, &session);
             let body = SessionResponse {
                 web_client_id: virtual_web_client_id(client_id),
                 client_id,
                 is_read_only: session.is_read_only,
                 e2e_encrypted: session.e2e_encrypted,
                 tunnel_id: entry.tunnel_id.to_string(),
+                session_rows,
+                session_cols,
             };
             let mut response = Json(body).into_response();
             if let Ok(cookie_header) =
@@ -648,8 +687,32 @@ async fn handle_viewer_control(
             .entry(session.viewer_id)
             .or_insert_with(ViewerHandle::default);
         handle.is_read_only = session.is_read_only;
-        handle.control_sink_tx = Some(out_tx);
+        handle.control_sink_tx = Some(out_tx.clone());
         handle.disconnect_control = Some(disconnect_tx);
+    }
+
+    // Prime the viewer with the cached session viewport so the browser's
+    // clipper initialises at the right dimensions on first load.
+    // Without this, a viewer joining after the r/o group received its
+    // initial `SessionSize` tunnel frame would miss the one-shot fan-out
+    // and render at the 24x80 fallback until the sharer happened to
+    // resize.
+    if let ViewerRouting::Ro(token_hash) = &session.routing {
+        let cached = entry
+            .ro_groups
+            .lock()
+            .unwrap()
+            .get(token_hash)
+            .and_then(|g| g.session_size);
+        if let Some((rows, cols)) = cached {
+            let payload = serde_json::json!({
+                "type": "SessionSizeChanged",
+                "rows": rows,
+                "cols": cols,
+            })
+            .to_string();
+            let _ = out_tx.send(Message::Text(payload.into()));
+        }
     }
 
     let writer = tokio::spawn(async move {

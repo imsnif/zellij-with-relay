@@ -280,6 +280,48 @@ fn read_only_viewer_update_positive_count_roundtrip() {
 }
 
 #[test]
+fn session_size_roundtrip() {
+    let original = ControlMessage::SessionSize {
+        client_id: 7,
+        rows: 40,
+        cols: 120,
+    };
+    match decode_control_frame(&original.encode()).unwrap() {
+        ControlMessage::SessionSize {
+            client_id,
+            rows,
+            cols,
+        } => {
+            assert_eq!(client_id, 7);
+            assert_eq!(rows, 40);
+            assert_eq!(cols, 120);
+        },
+        other => panic!("expected SessionSize, got {:?}", other),
+    }
+}
+
+#[test]
+fn session_size_zero_dimensions_roundtrip() {
+    let original = ControlMessage::SessionSize {
+        client_id: 0,
+        rows: 0,
+        cols: 0,
+    };
+    match decode_control_frame(&original.encode()).unwrap() {
+        ControlMessage::SessionSize {
+            client_id,
+            rows,
+            cols,
+        } => {
+            assert_eq!(client_id, 0);
+            assert_eq!(rows, 0);
+            assert_eq!(cols, 0);
+        },
+        other => panic!("expected SessionSize, got {:?}", other),
+    }
+}
+
+#[test]
 fn terminal_frame_data_roundtrip() {
     let original = TerminalMessage::TerminalFrameData {
         client_id: 11,

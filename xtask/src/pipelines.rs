@@ -332,6 +332,21 @@ pub fn publish(sh: &Shell, flags: flags::Publish) -> anyhow::Result<()> {
         )
         .context(err_context)?;
 
+        // Build the ansi-clip wasm blob. The resulting
+        // `zellij-web-client-assets/assets/clip.wasm` is picked up by the
+        // `git commit -aem` below and shipped alongside the plugin wasm.
+        build::build(
+            sh,
+            flags::Build {
+                release: true,
+                no_plugins: true,
+                plugins_only: false,
+                no_web: true,
+                wasm_clip: true,
+            },
+        )
+        .context(err_context)?;
+
         // Update default config
         sh.copy_file(
             project_dir

@@ -52,6 +52,11 @@ pub enum ControlMessage {
         token_hash: String,
         count: u32,
     },
+    SessionSize {
+        client_id: u32,
+        rows: u32,
+        cols: u32,
+    },
 }
 
 /// High-level Rust view of a terminal-tunnel frame.
@@ -160,6 +165,15 @@ impl From<ControlMessage> for proto::ControlFrame {
                     count,
                 })
             },
+            ControlMessage::SessionSize {
+                client_id,
+                rows,
+                cols,
+            } => Payload::SessionSize(proto::SessionSize {
+                client_id,
+                rows,
+                cols,
+            }),
         };
         proto::ControlFrame {
             payload: Some(payload),
@@ -212,6 +226,11 @@ impl TryFrom<proto::ControlFrame> for ControlMessage {
             Some(Payload::ReadOnlyViewerUpdate(u)) => Ok(ControlMessage::ReadOnlyViewerUpdate {
                 token_hash: u.token_hash,
                 count: u.count,
+            }),
+            Some(Payload::SessionSize(s)) => Ok(ControlMessage::SessionSize {
+                client_id: s.client_id,
+                rows: s.rows,
+                cols: s.cols,
             }),
             None => Err(anyhow!("ControlFrame has no payload")),
         }

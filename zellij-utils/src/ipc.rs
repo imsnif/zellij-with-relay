@@ -226,6 +226,10 @@ pub enum ServerToClientMsg {
         token: u32,
         query_bytes: Vec<u8>,
     },
+    SessionSize {
+        rows: u32,
+        cols: u32,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

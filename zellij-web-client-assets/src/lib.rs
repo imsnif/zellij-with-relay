@@ -21,11 +21,40 @@ pub struct AssetResponse {
     pub contents: &'static [u8],
 }
 
+/// When the `clip_wasm_from_target` feature is enabled, bundle the live
+/// `zellij-ansi-clip` build artifact instead of the committed blob so edits
+/// to the crate are picked up without a commit. Release builds + CI always
+/// use the committed `assets/clip.wasm`.
+#[cfg(feature = "clip_wasm_from_target")]
+static CLIP_WASM_FROM_TARGET: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../target/wasm32-unknown-unknown/release/zellij_ansi_clip.wasm"
+));
+
+fn clip_wasm_override() -> Option<&'static [u8]> {
+    #[cfg(feature = "clip_wasm_from_target")]
+    {
+        Some(CLIP_WASM_FROM_TARGET)
+    }
+    #[cfg(not(feature = "clip_wasm_from_target"))]
+    {
+        None
+    }
+}
+
 /// Resolve an asset by relative path (e.g. `"index.js"` or `"xterm.css"`).
 /// Returns the bytes alongside the resolved MIME type. Returns `None` when
 /// the path does not match a bundled asset.
 pub fn lookup(path: &str) -> Option<AssetResponse> {
     let trimmed = path.trim_start_matches('/');
+    if trimmed == "clip.wasm" {
+        if let Some(bytes) = clip_wasm_override() {
+            return Some(AssetResponse {
+                content_type: "application/wasm",
+                contents: bytes,
+            });
+        }
+    }
     let file = ASSETS_DIR.get_file(trimmed)?;
     let ext = file.path().extension().and_then(|ext| ext.to_str());
     Some(AssetResponse {

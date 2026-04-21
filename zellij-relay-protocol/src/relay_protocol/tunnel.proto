@@ -85,6 +85,16 @@ message ReadOnlyViewerUpdate {
   uint32 count = 2;
 }
 
+// Zellij → Relay: session-viewport size for a relay-fan-out virtual watcher.
+// Sent when the watcher is first registered and on every sharer-side resize.
+// The relay updates its r/o group state and forwards to every viewer so the
+// client-side clippers can re-emit at the new dimensions.
+message SessionSize {
+  uint32 client_id = 1;
+  uint32 rows = 2;
+  uint32 cols = 3;
+}
+
 // Envelope for all control-tunnel messages. All Phase 1 messages that travel
 // on the control tunnel are wrapped in this oneof so that Phase 2+ can add
 // variants (AuthChallenge, ClientConnected, ControlFrame, ...) without
@@ -100,7 +110,7 @@ message ControlFrame {
     ClientDisconnected client_disconnected = 7;
     ControlFrameData control_frame_data = 8;
     ReadOnlyViewerUpdate read_only_viewer_update = 9;
-    // tag 10 reserved for SessionSize (D3)
+    SessionSize session_size = 10;
   }
 }
 
