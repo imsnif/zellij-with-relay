@@ -68,6 +68,18 @@ pub struct RelayTunnelState {
     /// Keyed by the Zellij-allocated `client_id`.
     pub pending_e2e_keys: Mutex<HashMap<u32, [u8; KEY_LEN]>>,
 
+    /// `is_read_only` flag recorded during `AuthChallenge` handling, drained
+    /// by `spawn_virtual_client` when it decides whether to attach as a
+    /// regular client or a relay-fan-out watcher.
+    pub pending_read_only: Mutex<HashMap<u32, bool>>,
+
+    /// Maps the (hex-encoded) `token_hash` of a validated r/o token to the
+    /// client_id of the virtual watcher currently backing its fan-out
+    /// group. Populated when r/o auth succeeds; cleared when the relay
+    /// signals the group has become dormant via
+    /// `ReadOnlyViewerUpdate { count: 0 }`.
+    pub token_hash_to_client_id: Mutex<HashMap<String, u32>>,
+
     pub session_name: String,
     pub connection_table: Arc<Mutex<ConnectionTable>>,
     pub os_api_factory: Arc<dyn ClientOsApiFactory>,

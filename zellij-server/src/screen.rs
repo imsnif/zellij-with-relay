@@ -798,6 +798,7 @@ pub enum ScreenInstruction {
     ClearKeyPressesIntercepts(ClientId),
     ReplacePaneWithExistingPane(PaneId, PaneId, bool, Option<NotificationEnd>), // bool -> suppress_replaced_pane
     AddWatcherClient(ClientId, Size),
+    AddRelayWatcherClient(ClientId),
     RemoveWatcherClient(ClientId),
     SetFollowedClient(ClientId),
     WatcherTerminalResize(ClientId, Size),
@@ -1126,6 +1127,7 @@ impl From<&ScreenInstruction> for ScreenContext {
                 ScreenContext::ReplacePaneWithExistingPane
             },
             ScreenInstruction::AddWatcherClient(..) => ScreenContext::AddWatcherClient,
+            ScreenInstruction::AddRelayWatcherClient(..) => ScreenContext::AddWatcherClient,
             ScreenInstruction::RemoveWatcherClient(..) => ScreenContext::RemoveWatcherClient,
             ScreenInstruction::SetFollowedClient(..) => ScreenContext::SetFollowedClient,
             ScreenInstruction::WatcherTerminalResize(..) => ScreenContext::WatcherTerminalResize,
@@ -1298,6 +1300,11 @@ impl RenderBlocker {
 pub(crate) struct WatcherState {
     size: Size,
     should_force_render: bool,
+    /// True when the watcher is a virtual client owned by a relay r/o
+    /// fan-out group — its size must track the Screen's own size so the
+    /// ciphertext stream produced by `Output::serialize_with_size` matches
+    /// the real session viewport for any number of browser viewers.
+    is_relay_fanout: bool,
 }
 
 impl WatcherState {
@@ -1305,6 +1312,15 @@ impl WatcherState {
         WatcherState {
             size,
             should_force_render: true,
+            is_relay_fanout: false,
+        }
+    }
+
+    pub fn new_relay_fanout(size: Size) -> Self {
+        WatcherState {
+            size,
+            should_force_render: true,
+            is_relay_fanout: true,
         }
     }
 
@@ -1326,6 +1342,10 @@ impl WatcherState {
 
     pub fn set_force_render(&mut self) {
         self.should_force_render = true;
+    }
+
+    pub fn is_relay_fanout(&self) -> bool {
+        self.is_relay_fanout
     }
 }
 
@@ -2044,6 +2064,15 @@ impl Screen {
                 tab.resize_whole_tab(new_screen_size)
                     .with_context(err_context)?;
                 tab.set_force_render();
+            }
+            // Relay-fan-out virtual watchers are registered at the session
+            // viewport size; propagate the new size so their outbound
+            // stream stays in sync with the real terminal state.
+            for watcher_state in self.watcher_clients.values_mut() {
+                if watcher_state.is_relay_fanout() {
+                    watcher_state.set_size(new_screen_size);
+                    watcher_state.set_force_render();
+                }
             }
             self.log_and_report_session_state()
                 .with_context(err_context)?;
@@ -3040,6 +3069,17 @@ impl Screen {
         // This ensures they get complete state, not just delta
         self.render(None)?;
 
+        Ok(())
+    }
+
+    /// Register a relay-fan-out virtual watcher at the current session
+    /// viewport size. Subsequent `resize_to_screen` updates propagate to
+    /// every watcher with `is_relay_fanout == true`.
+    pub fn add_relay_watcher_client(&mut self, client_id: ClientId) -> Result<()> {
+        let size = self.size;
+        self.watcher_clients
+            .insert(client_id, WatcherState::new_relay_fanout(size));
+        self.render(None)?;
         Ok(())
     }
 
@@ -9179,6 +9219,11 @@ pub(crate) fn screen_thread_main(
                     .context("failed to add watcher client")?;
                 screen.set_watcher_size(client_id, size);
                 screen.render(None)?;
+            },
+            ScreenInstruction::AddRelayWatcherClient(client_id) => {
+                screen
+                    .add_relay_watcher_client(client_id)
+                    .context("failed to add relay watcher client")?;
             },
             ScreenInstruction::RemoveWatcherClient(client_id) => {
                 screen.remove_watcher_client(client_id);

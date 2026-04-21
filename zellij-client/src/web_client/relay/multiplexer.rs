@@ -188,6 +188,9 @@ where
                         },
                     }
                 },
+                ControlMessage::ReadOnlyViewerUpdate { token_hash, count } => {
+                    handle_read_only_viewer_update(&state, token_hash, count);
+                },
                 ControlMessage::Error { message } => {
                     log::warn!("relay reported control error: {}", message);
                 },
@@ -267,7 +270,7 @@ fn handle_auth_challenge(
     token_hash: String,
 ) {
     let outcome = validate_auth_token_hash(&token_hash);
-    let response = match outcome {
+    let (response, spawn_ro_for_client_id) = match outcome {
         Ok(Some(is_read_only)) => {
             let client_id = state.next_client_id.fetch_add(1, Ordering::Relaxed);
             // Phase 3: the relay path is unconditionally E2E-encrypted.
@@ -280,25 +283,38 @@ fn handle_auth_challenge(
                 .lock()
                 .unwrap()
                 .insert(client_id, key);
-            ControlMessage::AuthResponse {
+            // Phase 4: stash the r/o flag so `spawn_virtual_client` can
+            // thread it through when attaching to the Zellij server.
+            state
+                .pending_read_only
+                .lock()
+                .unwrap()
+                .insert(client_id, is_read_only);
+            // Remember which client_id backs this r/o fan-out group so
+            // `ReadOnlyViewerUpdate { count: 0 }` can tear it down.
+            if is_read_only {
+                state
+                    .token_hash_to_client_id
+                    .lock()
+                    .unwrap()
+                    .insert(token_hash.clone(), client_id);
+            }
+            let response = ControlMessage::AuthResponse {
                 request_id,
                 client_id,
                 accepted: true,
                 is_read_only,
                 session_token_hash: token_hash,
                 e2e_encrypted: true,
-            }
+            };
+            // For r/w clients the relay follows up with `ClientConnected`
+            // which triggers spawn_virtual_client. The r/o path skips that
+            // step — the relay sends `ReadOnlyViewerUpdate` instead — so
+            // the virtual watcher must be spawned from here.
+            let ro_spawn = if is_read_only { Some(client_id) } else { None };
+            (response, ro_spawn)
         },
-        Ok(None) => ControlMessage::AuthResponse {
-            request_id,
-            client_id: 0,
-            accepted: false,
-            is_read_only: false,
-            session_token_hash: token_hash,
-            e2e_encrypted: false,
-        },
-        Err(e) => {
-            log::error!("token hash validation failed: {}", e);
+        Ok(None) => (
             ControlMessage::AuthResponse {
                 request_id,
                 client_id: 0,
@@ -306,10 +322,34 @@ fn handle_auth_challenge(
                 is_read_only: false,
                 session_token_hash: token_hash,
                 e2e_encrypted: false,
-            }
+            },
+            None,
+        ),
+        Err(e) => {
+            log::error!("token hash validation failed: {}", e);
+            (
+                ControlMessage::AuthResponse {
+                    request_id,
+                    client_id: 0,
+                    accepted: false,
+                    is_read_only: false,
+                    session_token_hash: token_hash,
+                    e2e_encrypted: false,
+                },
+                None,
+            )
         },
     };
     let _ = state.control_tunnel_tx.send(response.encode());
+
+    if let Some(client_id) = spawn_ro_for_client_id {
+        if let Err(e) = spawn_virtual_client(state, client_id) {
+            log::error!(
+                "failed to spawn r/o virtual watcher {}: {}",
+                client_id, e
+            );
+        }
+    }
 }
 
 fn handle_client_connected(state: &Arc<RelayTunnelState>, client_id: u32) {
@@ -322,6 +362,44 @@ fn handle_client_connected(state: &Arc<RelayTunnelState>, client_id: u32) {
         let _ = state
             .control_tunnel_tx
             .send(ControlMessage::ClientDisconnected { client_id }.encode());
+    }
+}
+
+/// React to a relay-reported r/o fan-out group size change. `count == 0`
+/// tears down the virtual watcher (the group went dormant); positive
+/// counts are observational only — fan-out is a relay-side concern and
+/// Zellij does not need to track individual viewers.
+fn handle_read_only_viewer_update(
+    state: &Arc<RelayTunnelState>,
+    token_hash: String,
+    count: u32,
+) {
+    if count == 0 {
+        let client_id = state
+            .token_hash_to_client_id
+            .lock()
+            .unwrap()
+            .remove(&token_hash);
+        match client_id {
+            Some(cid) => {
+                log::info!(
+                    "relay r/o group for token_hash={} went dormant; tearing down virtual watcher {}",
+                    token_hash, cid
+                );
+                handle_client_disconnected(state, cid);
+            },
+            None => {
+                log::debug!(
+                    "ReadOnlyViewerUpdate count=0 for unknown token_hash={} — ignoring",
+                    token_hash
+                );
+            },
+        }
+    } else {
+        log::debug!(
+            "relay r/o group for token_hash={} now has {} viewer(s)",
+            token_hash, count
+        );
     }
 }
 
@@ -372,10 +450,20 @@ fn spawn_virtual_client(
     // session token hash so ownership checks in the ConnectionTable remain
     // consistent. The value is only used for same-table lookups on this host.
     let tunnel_session_hash = format!("relay-tunnel-{}", client_id);
-    // Phase 2: always treat relay-connected clients as r/w here; the r/o
-    // enforcement happens inside the Zellij server (AttachWatcherClient).
-    // Phase 4 will thread through the is_read_only flag from AuthResponse.
-    let is_read_only = false;
+    // Phase 4: drain the is_read_only flag stashed by handle_auth_challenge.
+    // Missing entries mean a `ClientConnected` arrived without a preceding
+    // `AuthChallenge` — fail-closed, mirroring the e2e-key pattern above.
+    let is_read_only = state
+        .pending_read_only
+        .lock()
+        .unwrap()
+        .remove(&client_id)
+        .ok_or_else(|| {
+            format!(
+                "no pending is_read_only flag for client_id={} — spawn without prior AuthChallenge",
+                client_id
+            )
+        })?;
 
     {
         let mut ct = state.connection_table.lock().unwrap();
@@ -385,6 +473,9 @@ fn spawn_virtual_client(
             is_read_only,
             tunnel_session_hash,
         );
+        // Relay r/o virtual watchers use the session-viewport `AttachRelayWatcherClient`
+        // first-message so fan-out stays coherent across viewer window sizes.
+        ct.set_client_relay_fanout(&web_client_id, is_read_only);
     }
 
     // Outbound pump: stdout from server → TerminalFrameData on tunnel.
@@ -488,10 +579,23 @@ fn spawn_virtual_client(
         .unwrap_or(false);
     let os_api_input = os_api.clone();
     let inbound_key = e2e_key;
+    let inbound_is_read_only = is_read_only;
     tokio::spawn(async move {
         let mut mouse_old_event = MouseEvent::new();
         let mut stdin_session = StdinSession::new(explicitly_disable_kitty_keyboard_protocol);
         while let Some(buf) = terminal_input_rx.recv().await {
+            if inbound_is_read_only {
+                // Phase 4: r/o viewers must never inject input. The relay
+                // already drops viewer-originated frames before they reach
+                // the tunnel; this is belt-and-braces — drain and discard
+                // anything that slips through.
+                log::warn!(
+                    "r/o viewer terminal frame reached multiplexer (client_id={}) — dropping {} bytes",
+                    client_id,
+                    buf.len()
+                );
+                continue;
+            }
             let plaintext = match crypto::decrypt(&inbound_key, &buf) {
                 Ok(p) => p,
                 Err(e) => {

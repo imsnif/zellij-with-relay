@@ -108,6 +108,17 @@ pub struct TerminalFrameData {
     #[prost(bytes="vec", tag="2")]
     pub data: ::prost::alloc::vec::Vec<u8>,
 }
+/// Relay → Zellij: current number of r/o viewers in a fan-out group for a
+/// given token hash. `count == 0` signals the group has become dormant and the
+/// virtual watcher may be torn down.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ReadOnlyViewerUpdate {
+    #[prost(string, tag="1")]
+    pub token_hash: ::prost::alloc::string::String,
+    #[prost(uint32, tag="2")]
+    pub count: u32,
+}
 /// Envelope for all control-tunnel messages. All Phase 1 messages that travel
 /// on the control tunnel are wrapped in this oneof so that Phase 2+ can add
 /// variants (AuthChallenge, ClientConnected, ControlFrame, ...) without
@@ -115,7 +126,7 @@ pub struct TerminalFrameData {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ControlFrame {
-    #[prost(oneof="control_frame::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8")]
+    #[prost(oneof="control_frame::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9")]
     pub payload: ::core::option::Option<control_frame::Payload>,
 }
 /// Nested message and enum types in `ControlFrame`.
@@ -139,6 +150,9 @@ pub mod control_frame {
         ClientDisconnected(super::ClientDisconnected),
         #[prost(message, tag="8")]
         ControlFrameData(super::ControlFrameData),
+        /// tag 10 reserved for SessionSize (D3)
+        #[prost(message, tag="9")]
+        ReadOnlyViewerUpdate(super::ReadOnlyViewerUpdate),
     }
 }
 /// Envelope for all terminal-tunnel messages.

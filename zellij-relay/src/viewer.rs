@@ -22,7 +22,7 @@ use tokio::time::timeout;
 use uuid::Uuid;
 use zellij_relay_protocol::{ControlMessage, TerminalMessage};
 
-use crate::registry::{TunnelEntry, ViewerHandle, ViewerSession};
+use crate::registry::{RoGroup, TunnelEntry, ViewerHandle, ViewerRouting, ViewerSession};
 use crate::router::AppState;
 
 const AUTH_CHALLENGE_TIMEOUT_SECS: u64 = 5;
@@ -125,14 +125,157 @@ pub async fn serve_asset(
     }
 }
 
-async fn challenge_and_register(
-    entry: &Arc<TunnelEntry>,
-    auth_token: &str,
-    slug: &str,
-) -> Option<(Uuid, Cookie<'static>, ViewerSession)> {
-    let token_hash = hash_auth_token(auth_token);
-    let request_id = Uuid::new_v4().as_bytes().to_vec();
+/// Outcome of resolving a new viewer's auth token against the tunnel.
+/// Either returns the joined `ViewerSession` (ready to be returned to
+/// the browser) or `None` for a uniform-401 fallthrough.
+struct RegisterOutcome {
+    cookie: Cookie<'static>,
+    session: ViewerSession,
+    client_id: u32,
+}
 
+fn finalise_ro_first(
+    entry: &Arc<TunnelEntry>,
+    slug: &str,
+    token_hash: &str,
+    client_id: u32,
+    e2e_encrypted: bool,
+) -> Option<RegisterOutcome> {
+    let viewer_id = Uuid::new_v4();
+    let mut viewer_ids = std::collections::HashSet::new();
+    viewer_ids.insert(viewer_id);
+    entry.ro_groups.lock().unwrap().insert(
+        token_hash.to_string(),
+        RoGroup {
+            validated: true,
+            active_client_id: Some(client_id),
+            e2e_encrypted,
+            viewer_ids,
+        },
+    );
+    entry
+        .client_id_to_token_hash
+        .lock()
+        .unwrap()
+        .insert(client_id, token_hash.to_string());
+    let session = ViewerSession {
+        viewer_id,
+        routing: ViewerRouting::Ro(token_hash.to_string()),
+        token_hash: token_hash.to_string(),
+        is_read_only: true,
+        e2e_encrypted,
+    };
+    let cookie = build_session_cookie(slug, viewer_id);
+    store_session(entry, viewer_id, session.clone());
+    emit_ro_viewer_update(entry, token_hash);
+    Some(RegisterOutcome {
+        cookie,
+        session,
+        client_id,
+    })
+}
+
+fn finalise_ro_join(
+    entry: &Arc<TunnelEntry>,
+    slug: &str,
+    token_hash: &str,
+    group: RoGroup,
+) -> Option<RegisterOutcome> {
+    let viewer_id = Uuid::new_v4();
+    let client_id = group.active_client_id?;
+    {
+        let mut groups = entry.ro_groups.lock().unwrap();
+        let entry_mut = groups.get_mut(token_hash)?;
+        entry_mut.viewer_ids.insert(viewer_id);
+    }
+    let session = ViewerSession {
+        viewer_id,
+        routing: ViewerRouting::Ro(token_hash.to_string()),
+        token_hash: token_hash.to_string(),
+        is_read_only: true,
+        e2e_encrypted: group.e2e_encrypted,
+    };
+    let cookie = build_session_cookie(slug, viewer_id);
+    store_session(entry, viewer_id, session.clone());
+    emit_ro_viewer_update(entry, token_hash);
+    Some(RegisterOutcome {
+        cookie,
+        session,
+        client_id,
+    })
+}
+
+fn finalise_ro_revive(
+    entry: &Arc<TunnelEntry>,
+    slug: &str,
+    token_hash: &str,
+    client_id: u32,
+    e2e_encrypted: bool,
+) -> Option<RegisterOutcome> {
+    let viewer_id = Uuid::new_v4();
+    {
+        let mut groups = entry.ro_groups.lock().unwrap();
+        let group = groups.get_mut(token_hash)?;
+        group.active_client_id = Some(client_id);
+        group.e2e_encrypted = e2e_encrypted;
+        group.viewer_ids.insert(viewer_id);
+    }
+    entry
+        .client_id_to_token_hash
+        .lock()
+        .unwrap()
+        .insert(client_id, token_hash.to_string());
+    let session = ViewerSession {
+        viewer_id,
+        routing: ViewerRouting::Ro(token_hash.to_string()),
+        token_hash: token_hash.to_string(),
+        is_read_only: true,
+        e2e_encrypted,
+    };
+    let cookie = build_session_cookie(slug, viewer_id);
+    store_session(entry, viewer_id, session.clone());
+    emit_ro_viewer_update(entry, token_hash);
+    Some(RegisterOutcome {
+        cookie,
+        session,
+        client_id,
+    })
+}
+
+fn store_session(entry: &Arc<TunnelEntry>, viewer_id: Uuid, session: ViewerSession) {
+    entry.sessions.lock().unwrap().insert(viewer_id, session);
+}
+
+fn build_session_cookie(slug: &str, viewer_id: Uuid) -> Cookie<'static> {
+    Cookie::build((SESSION_COOKIE, viewer_id.to_string()))
+        .http_only(true)
+        .same_site(SameSite::Strict)
+        .path(format!("/r/{}/", slug))
+        .build()
+}
+
+fn emit_ro_viewer_update(entry: &Arc<TunnelEntry>, token_hash: &str) {
+    let count = entry
+        .ro_groups
+        .lock()
+        .unwrap()
+        .get(token_hash)
+        .map(|g| g.viewer_ids.len())
+        .unwrap_or(0) as u32;
+    let _ = entry.control_tx.send(
+        ControlMessage::ReadOnlyViewerUpdate {
+            token_hash: token_hash.to_string(),
+            count,
+        }
+        .encode(),
+    );
+}
+
+async fn challenge_once(
+    entry: &Arc<TunnelEntry>,
+    token_hash: &str,
+) -> Option<crate::registry::AuthResponseResult> {
+    let request_id = Uuid::new_v4().as_bytes().to_vec();
     let (tx, rx) = oneshot::channel();
     entry
         .pending_auths
@@ -142,25 +285,62 @@ async fn challenge_and_register(
 
     let frame = ControlMessage::AuthChallenge {
         request_id: request_id.clone(),
-        token_hash: token_hash.clone(),
+        token_hash: token_hash.to_string(),
     };
     if entry.control_tx.send(frame.encode()).is_err() {
         entry.pending_auths.lock().unwrap().remove(&request_id);
         return None;
     }
 
-    let resp = match timeout(Duration::from_secs(AUTH_CHALLENGE_TIMEOUT_SECS), rx).await {
-        Ok(Ok(resp)) => resp,
+    match timeout(Duration::from_secs(AUTH_CHALLENGE_TIMEOUT_SECS), rx).await {
+        Ok(Ok(resp)) => Some(resp),
         _ => {
             entry.pending_auths.lock().unwrap().remove(&request_id);
-            return None;
+            None
         },
-    };
+    }
+}
 
+/// Drive the whole register-a-viewer flow.
+///
+/// * Already-cached r/o token: short-circuit — either join the live
+///   fan-out group, or re-challenge if the group went dormant.
+/// * Otherwise: one AuthChallenge round-trip. On `is_read_only: true`,
+///   open a fresh r/o group. On `is_read_only: false`, announce the
+///   client with `ClientConnected` as the r/w path.
+async fn register_viewer(
+    entry: &Arc<TunnelEntry>,
+    auth_token: &str,
+    slug: &str,
+) -> Option<RegisterOutcome> {
+    let token_hash = hash_auth_token(auth_token);
+    // Bind the cached lookup to a local so the MutexGuard temporary does
+    // not live across the `.await` inside the dormant-group branch.
+    let cached_group: Option<RoGroup> = entry
+        .ro_groups
+        .lock()
+        .unwrap()
+        .get(&token_hash)
+        .cloned();
+    if let Some(group) = cached_group {
+        if group.active_client_id.is_some() {
+            return finalise_ro_join(entry, slug, &token_hash, group);
+        }
+        // Dormant group: re-challenge to allocate a fresh client_id.
+        let resp = challenge_once(entry, &token_hash).await?;
+        if !resp.accepted || !resp.is_read_only {
+            return None;
+        }
+        return finalise_ro_revive(entry, slug, &token_hash, resp.client_id, resp.e2e_encrypted);
+    }
+
+    let resp = challenge_once(entry, &token_hash).await?;
     if !resp.accepted {
         return None;
     }
-
+    if resp.is_read_only {
+        return finalise_ro_first(entry, slug, &token_hash, resp.client_id, resp.e2e_encrypted);
+    }
     if entry
         .control_tx
         .send(
@@ -173,23 +353,26 @@ async fn challenge_and_register(
     {
         return None;
     }
-
-    let session_id = Uuid::new_v4();
+    let viewer_id = Uuid::new_v4();
+    entry
+        .client_id_to_viewer
+        .lock()
+        .unwrap()
+        .insert(resp.client_id, viewer_id);
     let session = ViewerSession {
-        client_id: resp.client_id,
+        viewer_id,
+        routing: ViewerRouting::Rw(resp.client_id),
         token_hash,
-        is_read_only: resp.is_read_only,
+        is_read_only: false,
         e2e_encrypted: resp.e2e_encrypted,
     };
-    entry.sessions.lock().unwrap().insert(session_id, session.clone());
-
-    let cookie = Cookie::build((SESSION_COOKIE, session_id.to_string()))
-        .http_only(true)
-        .same_site(SameSite::Strict)
-        .path(format!("/r/{}/", slug))
-        .build();
-
-    Some((session_id, cookie, session))
+    let cookie = build_session_cookie(slug, viewer_id);
+    store_session(entry, viewer_id, session.clone());
+    Some(RegisterOutcome {
+        cookie,
+        session,
+        client_id: resp.client_id,
+    })
 }
 
 /// `POST /r/:slug/command/login` — first half of the browser auth flow.
@@ -203,8 +386,8 @@ pub async fn post_login(
     let Some(entry) = state.registry.get(&slug) else {
         return uniform_unauthorised();
     };
-    match challenge_and_register(&entry, &req.auth_token, &slug).await {
-        Some((_session_id, cookie, _session)) => {
+    match register_viewer(&entry, &req.auth_token, &slug).await {
+        Some(RegisterOutcome { cookie, .. }) => {
             let mut response = Json(LoginResponse {
                 success: true,
                 message: "Login successful".to_string(),
@@ -237,9 +420,19 @@ pub async fn post_session(
 
     // Try the cookie first: this is the JS flow's second step.
     if let Some(session) = resolve_session(&entry, request.headers()) {
+        let client_id = match &session.routing {
+            ViewerRouting::Rw(id) => *id,
+            ViewerRouting::Ro(token_hash) => entry
+                .ro_groups
+                .lock()
+                .unwrap()
+                .get(token_hash)
+                .and_then(|g| g.active_client_id)
+                .unwrap_or(0),
+        };
         let body = SessionResponse {
-            web_client_id: virtual_web_client_id(session.client_id),
-            client_id: session.client_id,
+            web_client_id: virtual_web_client_id(client_id),
+            client_id,
             is_read_only: session.is_read_only,
             e2e_encrypted: session.e2e_encrypted,
             tunnel_id: entry.tunnel_id.to_string(),
@@ -260,11 +453,15 @@ pub async fn post_session(
         return uniform_unauthorised();
     };
 
-    match challenge_and_register(&entry, &auth_token, &slug).await {
-        Some((_session_id, cookie, session)) => {
+    match register_viewer(&entry, &auth_token, &slug).await {
+        Some(RegisterOutcome {
+            cookie,
+            session,
+            client_id,
+        }) => {
             let body = SessionResponse {
-                web_client_id: virtual_web_client_id(session.client_id),
-                client_id: session.client_id,
+                web_client_id: virtual_web_client_id(client_id),
+                client_id,
                 is_read_only: session.is_read_only,
                 e2e_encrypted: session.e2e_encrypted,
                 tunnel_id: entry.tunnel_id.to_string(),
@@ -281,16 +478,6 @@ pub async fn post_session(
         },
         None => uniform_unauthorised(),
     }
-}
-
-fn lookup_session_id(entry: &Arc<TunnelEntry>, client_id: u32) -> Option<Uuid> {
-    entry
-        .sessions
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|(_, s)| s.client_id == client_id)
-        .map(|(id, _)| *id)
 }
 
 fn parse_cookies(headers: &HeaderMap) -> std::collections::HashMap<String, String> {
@@ -310,8 +497,8 @@ fn parse_cookies(headers: &HeaderMap) -> std::collections::HashMap<String, Strin
 fn resolve_session(entry: &Arc<TunnelEntry>, headers: &HeaderMap) -> Option<ViewerSession> {
     let cookies = parse_cookies(headers);
     let id = cookies.get(SESSION_COOKIE)?;
-    let session_id = Uuid::parse_str(id).ok()?;
-    entry.sessions.lock().unwrap().get(&session_id).cloned()
+    let viewer_id = Uuid::parse_str(id).ok()?;
+    entry.sessions.lock().unwrap().get(&viewer_id).cloned()
 }
 
 pub async fn ws_terminal(
@@ -374,7 +561,7 @@ async fn handle_viewer_terminal(
     {
         let mut viewers = entry.viewers.lock().unwrap();
         let handle = viewers
-            .entry(session.client_id)
+            .entry(session.viewer_id)
             .or_insert_with(ViewerHandle::default);
         handle.is_read_only = session.is_read_only;
         handle.terminal_sink_tx = Some(out_tx);
@@ -391,7 +578,7 @@ async fn handle_viewer_terminal(
     });
 
     let reader_entry = entry.clone();
-    let client_id = session.client_id;
+    let reader_session = session.clone();
     let reader = tokio::spawn(async move {
         while let Some(frame) = stream.next().await {
             let bytes = match frame {
@@ -401,22 +588,37 @@ async fn handle_viewer_terminal(
                 Ok(_) => continue,
                 Err(_) => break,
             };
-            let tm = TerminalMessage::TerminalFrameData {
-                client_id,
-                data: bytes,
-            };
-            let tx_clone = reader_entry.terminal_tx.lock().unwrap().clone();
-            match tx_clone {
-                Some(tx) => {
-                    if tx.send(tm.encode()).is_err() {
-                        break;
-                    }
-                },
-                None => {
+            match &reader_session.routing {
+                ViewerRouting::Ro(_) => {
+                    // Defense-in-depth: r/o viewers must never inject
+                    // input. Drain and drop.
                     tracing::warn!(
                         slug = %reader_entry.slug,
-                        "terminal tunnel not yet linked; dropping viewer frame"
+                        viewer_id = %reader_session.viewer_id,
+                        bytes = bytes.len(),
+                        "r/o viewer attempted input — dropped"
                     );
+                    continue;
+                },
+                ViewerRouting::Rw(client_id) => {
+                    let tm = TerminalMessage::TerminalFrameData {
+                        client_id: *client_id,
+                        data: bytes,
+                    };
+                    let tx_clone = reader_entry.terminal_tx.lock().unwrap().clone();
+                    match tx_clone {
+                        Some(tx) => {
+                            if tx.send(tm.encode()).is_err() {
+                                break;
+                            }
+                        },
+                        None => {
+                            tracing::warn!(
+                                slug = %reader_entry.slug,
+                                "terminal tunnel not yet linked; dropping viewer frame"
+                            );
+                        },
+                    }
                 },
             }
         }
@@ -428,7 +630,7 @@ async fn handle_viewer_terminal(
         _ = reader => {},
     }
 
-    cleanup_viewer(&entry, client_id);
+    cleanup_viewer(&entry, &session);
 }
 
 async fn handle_viewer_control(
@@ -443,7 +645,7 @@ async fn handle_viewer_control(
     {
         let mut viewers = entry.viewers.lock().unwrap();
         let handle = viewers
-            .entry(session.client_id)
+            .entry(session.viewer_id)
             .or_insert_with(ViewerHandle::default);
         handle.is_read_only = session.is_read_only;
         handle.control_sink_tx = Some(out_tx);
@@ -460,7 +662,7 @@ async fn handle_viewer_control(
     });
 
     let reader_entry = entry.clone();
-    let client_id = session.client_id;
+    let reader_session = session.clone();
     let reader = tokio::spawn(async move {
         while let Some(frame) = stream.next().await {
             let bytes = match frame {
@@ -470,12 +672,26 @@ async fn handle_viewer_control(
                 Ok(_) => continue,
                 Err(_) => break,
             };
-            let cm = ControlMessage::ControlFrameData {
-                client_id,
-                data: bytes,
-            };
-            if reader_entry.control_tx.send(cm.encode()).is_err() {
-                break;
+            match &reader_session.routing {
+                ViewerRouting::Ro(_) => {
+                    // r/o control messages are also ignored: no resize
+                    // propagates to Zellij (all clipping is client-side).
+                    tracing::debug!(
+                        slug = %reader_entry.slug,
+                        viewer_id = %reader_session.viewer_id,
+                        "r/o viewer control frame dropped"
+                    );
+                    continue;
+                },
+                ViewerRouting::Rw(client_id) => {
+                    let cm = ControlMessage::ControlFrameData {
+                        client_id: *client_id,
+                        data: bytes,
+                    };
+                    if reader_entry.control_tx.send(cm.encode()).is_err() {
+                        break;
+                    }
+                },
             }
         }
     });
@@ -486,25 +702,73 @@ async fn handle_viewer_control(
         _ = reader => {},
     }
 
-    cleanup_viewer(&entry, client_id);
+    cleanup_viewer(&entry, &session);
 }
 
-fn cleanup_viewer(entry: &Arc<TunnelEntry>, client_id: u32) {
-    let mut viewers = entry.viewers.lock().unwrap();
-    if let Some(handle) = viewers.get_mut(&client_id) {
-        handle.control_sink_tx = None;
-        handle.terminal_sink_tx = None;
+fn cleanup_viewer(entry: &Arc<TunnelEntry>, session: &ViewerSession) {
+    let should_remove = {
+        let mut viewers = entry.viewers.lock().unwrap();
+        if let Some(handle) = viewers.get_mut(&session.viewer_id) {
+            handle.control_sink_tx = None;
+            handle.terminal_sink_tx = None;
+        }
+        viewers
+            .get(&session.viewer_id)
+            .map(|h| h.control_sink_tx.is_none() && h.terminal_sink_tx.is_none())
+            .unwrap_or(false)
+    };
+    if !should_remove {
+        return;
     }
-    // If neither side is active, remove and notify Zellij.
-    let should_remove = viewers
-        .get(&client_id)
-        .map(|h| h.control_sink_tx.is_none() && h.terminal_sink_tx.is_none())
-        .unwrap_or(false);
-    if should_remove {
-        viewers.remove(&client_id);
-        drop(viewers);
-        let _ = entry
-            .control_tx
-            .send(ControlMessage::ClientDisconnected { client_id }.encode());
+    {
+        let mut viewers = entry.viewers.lock().unwrap();
+        viewers.remove(&session.viewer_id);
+    }
+    entry.sessions.lock().unwrap().remove(&session.viewer_id);
+    match &session.routing {
+        ViewerRouting::Rw(client_id) => {
+            entry
+                .client_id_to_viewer
+                .lock()
+                .unwrap()
+                .remove(client_id);
+            let _ = entry.control_tx.send(
+                ControlMessage::ClientDisconnected {
+                    client_id: *client_id,
+                }
+                .encode(),
+            );
+        },
+        ViewerRouting::Ro(token_hash) => {
+            let (active_client_id, new_count) = {
+                let mut groups = entry.ro_groups.lock().unwrap();
+                if let Some(group) = groups.get_mut(token_hash) {
+                    group.viewer_ids.remove(&session.viewer_id);
+                    let count = group.viewer_ids.len();
+                    let acid = if count == 0 {
+                        group.active_client_id.take()
+                    } else {
+                        None
+                    };
+                    (acid, count as u32)
+                } else {
+                    (None, 0)
+                }
+            };
+            if let Some(cid) = active_client_id {
+                entry
+                    .client_id_to_token_hash
+                    .lock()
+                    .unwrap()
+                    .remove(&cid);
+            }
+            let _ = entry.control_tx.send(
+                ControlMessage::ReadOnlyViewerUpdate {
+                    token_hash: token_hash.clone(),
+                    count: new_count,
+                }
+                .encode(),
+            );
+        },
     }
 }

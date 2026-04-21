@@ -97,6 +97,10 @@ pub fn zellij_server_listener(
                         .lock()
                         .unwrap()
                         .is_client_read_only(&web_client_id);
+                    let is_relay_fanout = connection_table
+                        .lock()
+                        .unwrap()
+                        .is_client_relay_fanout(&web_client_id);
 
 
                     let session_exists = session_manager.session_exists(&session_name).unwrap_or(false);
@@ -108,7 +112,7 @@ pub fn zellij_server_listener(
                     }
 
                     let should_create_new_session = !session_exists;
-                    let first_message = create_first_message(is_read_only, config_file_path.clone(), client_attributes.clone(), config_options.clone(), should_create_new_session, &session_name, initial_layout);
+                    let first_message = create_first_message(is_read_only, is_relay_fanout, config_file_path.clone(), client_attributes.clone(), config_options.clone(), should_create_new_session, &session_name, initial_layout);
                     let zellij_ipc_pipe = create_ipc_pipe(&session_name);
 
                     session_manager.spawn_session_if_needed(

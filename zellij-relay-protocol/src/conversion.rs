@@ -48,6 +48,10 @@ pub enum ControlMessage {
         client_id: u32,
         data: Vec<u8>,
     },
+    ReadOnlyViewerUpdate {
+        token_hash: String,
+        count: u32,
+    },
 }
 
 /// High-level Rust view of a terminal-tunnel frame.
@@ -150,6 +154,12 @@ impl From<ControlMessage> for proto::ControlFrame {
             ControlMessage::ControlFrameData { client_id, data } => {
                 Payload::ControlFrameData(proto::ControlFrameData { client_id, data })
             },
+            ControlMessage::ReadOnlyViewerUpdate { token_hash, count } => {
+                Payload::ReadOnlyViewerUpdate(proto::ReadOnlyViewerUpdate {
+                    token_hash,
+                    count,
+                })
+            },
         };
         proto::ControlFrame {
             payload: Some(payload),
@@ -198,6 +208,10 @@ impl TryFrom<proto::ControlFrame> for ControlMessage {
             Some(Payload::ControlFrameData(d)) => Ok(ControlMessage::ControlFrameData {
                 client_id: d.client_id,
                 data: d.data,
+            }),
+            Some(Payload::ReadOnlyViewerUpdate(u)) => Ok(ControlMessage::ReadOnlyViewerUpdate {
+                token_hash: u.token_hash,
+                count: u.count,
             }),
             None => Err(anyhow!("ControlFrame has no payload")),
         }
