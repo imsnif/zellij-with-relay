@@ -22,6 +22,13 @@ pub fn build(sh: &Shell, flags: flags::Build) -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
+    if flags.wasm_clip {
+        // Short-circuit: `cargo x build --wasm-clip` only builds the clip wasm
+        // blob. This avoids pulling in the full workspace build on every
+        // iteration while the clipper is being developed.
+        return build_wasm_clip(sh, flags.release);
+    }
+
     // zellij-utils requires protobuf definition files to be present. Usually these are
     // auto-generated with `build.rs`-files, but this is currently broken for us.
     // See [this PR][1] for details.
@@ -184,6 +191,80 @@ fn run_proto_codegen(sh: &Shell) {
             prost.compile_protos(&proto_files, &[src_dir]).unwrap();
         }
     }
+}
+
+/// Build the `zellij-ansi-clip` crate for the `wasm32-unknown-unknown` target,
+/// then copy the resulting wasm blob into `zellij-web-client-assets/assets/clip.wasm`.
+/// Optionally runs `wasm-opt -Oz` if available.
+///
+/// Invoked from `cargo x build --wasm-clip`. Not part of the default build —
+/// requires the `wasm32-unknown-unknown` Rust target.
+pub fn build_wasm_clip(sh: &Shell, release: bool) -> anyhow::Result<()> {
+    let _pd = sh.push_dir(crate::project_root());
+
+    println!();
+    let msg = ">> Building zellij-ansi-clip wasm blob";
+    crate::status(msg);
+    println!("{}", msg);
+
+    // Make sure the target is installed; ignore failure (user may have it via
+    // rustup components already, or via a toolchain-pinned config).
+    let _ = cmd!(sh, "rustup target add wasm32-unknown-unknown")
+        .quiet()
+        .run();
+
+    let cargo = crate::cargo()?;
+    let mut base_cmd = cmd!(sh, "{cargo} build -p zellij-ansi-clip --features wasm --target wasm32-unknown-unknown")
+        .env("RUSTFLAGS", "-C strip=symbols -C opt-level=z");
+    if release {
+        base_cmd = base_cmd.arg("--release");
+    }
+    base_cmd
+        .run()
+        .context("failed to build zellij-ansi-clip wasm blob")?;
+
+    let profile = if release { "release" } else { "debug" };
+    let target_dir = PathBuf::from(
+        std::env::var_os("CARGO_TARGET_DIR")
+            .unwrap_or_else(|| crate::project_root().join("target").into_os_string()),
+    );
+    let wasm_src = target_dir
+        .join("wasm32-unknown-unknown")
+        .join(profile)
+        .join("zellij_ansi_clip.wasm");
+    if !wasm_src.is_file() {
+        return Err(anyhow::anyhow!(
+            "expected wasm artefact at '{}' after build",
+            wasm_src.display()
+        ));
+    }
+
+    let dst_dir = crate::project_root()
+        .join("zellij-web-client-assets")
+        .join("assets");
+    std::fs::create_dir_all(&dst_dir).context("failed to create assets directory")?;
+    let dst = dst_dir.join("clip.wasm");
+
+    // If wasm-opt is available, use it; otherwise a plain copy. `rustc` emits
+    // bulk-memory / reference-types / multivalue opcodes by default on stable
+    // toolchains — pass the matching `--enable-*` flags so wasm-opt accepts
+    // them instead of bailing out of validation.
+    let have_wasm_opt = which::which("wasm-opt").is_ok();
+    if have_wasm_opt {
+        cmd!(
+            sh,
+            "wasm-opt -Oz --enable-bulk-memory --enable-reference-types --enable-multivalue --enable-mutable-globals --enable-nontrapping-float-to-int --enable-sign-ext -o {dst} {wasm_src}"
+        )
+        .run()
+        .context("wasm-opt optimisation failed")?;
+    } else {
+        eprintln!("wasm-opt not found; skipping size-optimization pass");
+        sh.copy_file(&wasm_src, &dst)
+            .context("failed to copy zellij_ansi_clip.wasm into assets")?;
+    }
+
+    println!(">> clip.wasm written to {}", dst.display());
+    Ok(())
 }
 
 fn move_plugin_to_assets(sh: &Shell, plugin_name: &str) -> anyhow::Result<()> {

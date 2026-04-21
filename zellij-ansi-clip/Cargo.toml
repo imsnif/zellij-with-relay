@@ -1,0 +1,16 @@
+[package]
+name = "zellij-ansi-clip"
+version.workspace = true
+authors = ["Aram Drevekenin <aram@poor.dev>"]
+edition.workspace = true
+license.workspace = true
+description = "Standalone ANSI clipping / padding state machine for Zellij read-only relay viewers"
+include = ["src/**/*", "tests/fixtures/*", "README.md"]
+
+[features]
+default = ["std"]
+std = []
+wasm = []
+
+[lib]
+crate-type = ["cdylib", "rlib"]
