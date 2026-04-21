@@ -119,6 +119,20 @@ pub struct ReadOnlyViewerUpdate {
     #[prost(uint32, tag="2")]
     pub count: u32,
 }
+/// Zellij → Relay: session-viewport size for a relay-fan-out virtual watcher.
+/// Sent when the watcher is first registered and on every sharer-side resize.
+/// The relay updates its r/o group state and forwards to every viewer so the
+/// client-side clippers can re-emit at the new dimensions.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SessionSize {
+    #[prost(uint32, tag="1")]
+    pub client_id: u32,
+    #[prost(uint32, tag="2")]
+    pub rows: u32,
+    #[prost(uint32, tag="3")]
+    pub cols: u32,
+}
 /// Envelope for all control-tunnel messages. All Phase 1 messages that travel
 /// on the control tunnel are wrapped in this oneof so that Phase 2+ can add
 /// variants (AuthChallenge, ClientConnected, ControlFrame, ...) without
@@ -126,7 +140,7 @@ pub struct ReadOnlyViewerUpdate {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ControlFrame {
-    #[prost(oneof="control_frame::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9")]
+    #[prost(oneof="control_frame::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10")]
     pub payload: ::core::option::Option<control_frame::Payload>,
 }
 /// Nested message and enum types in `ControlFrame`.
@@ -150,9 +164,10 @@ pub mod control_frame {
         ClientDisconnected(super::ClientDisconnected),
         #[prost(message, tag="8")]
         ControlFrameData(super::ControlFrameData),
-        /// tag 10 reserved for SessionSize (D3)
         #[prost(message, tag="9")]
         ReadOnlyViewerUpdate(super::ReadOnlyViewerUpdate),
+        #[prost(message, tag="10")]
+        SessionSize(super::SessionSize),
     }
 }
 /// Envelope for all terminal-tunnel messages.

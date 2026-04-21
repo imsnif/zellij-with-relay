@@ -271,6 +271,14 @@ pub fn zellij_server_listener(
                                     },
                                 );
                             },
+                            Some(ServerToClientMsg::SessionSize { rows, cols }) => {
+                                client_connection_bus.send_control(
+                                    WebServerToWebClientControlMessage::SessionSizeChanged {
+                                        rows,
+                                        cols,
+                                    },
+                                );
+                            },
                             None => {
                                 if unknown_message_count >= 1000 {
                                     log::error!("Error: Received more than 1000 consecutive unknown server messages, disconnecting.");

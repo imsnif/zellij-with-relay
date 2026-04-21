@@ -15,7 +15,7 @@ use crate::{
         ServerToClientMsg as ProtoServerToClientMsg, StartWebServerMsg, SubscribeToPaneRendersMsg,
         SubscribedPaneClosedMsg, SwitchSessionMsg, TabMetadata as ProtoTabMetadata,
         TerminalPixelDimensionsMsg, TerminalResizeMsg, UnblockCliPipeInputMsg,
-        UnblockInputThreadMsg, WebServerStartedMsg,
+        UnblockInputThreadMsg, WebServerStartedMsg, SessionSizeMsg
     },
     data::{HostTerminalThemeMode, InputMode, PaneId},
     errors::prelude::*,
@@ -383,6 +383,9 @@ impl From<ServerToClientMsg> for ProtoServerToClientMsg {
                     query_bytes,
                 })
             },
+            ServerToClientMsg::SessionSize { rows, cols } => {
+                server_to_client_msg::Message::SessionSize(SessionSizeMsg { rows, cols })
+            },
         };
 
         ProtoServerToClientMsg {
@@ -493,6 +496,12 @@ impl TryFrom<ProtoServerToClientMsg> for ServerToClientMsg {
                 Ok(ServerToClientMsg::ForwardQueryToHost {
                     token: msg.token,
                     query_bytes: msg.query_bytes,
+                })
+            },
+            Some(server_to_client_msg::Message::SessionSize(msg)) => {
+                Ok(ServerToClientMsg::SessionSize {
+                    rows: msg.rows,
+                    cols: msg.cols,
                 })
             },
             None => Err(anyhow!("Empty ServerToClientMsg message")),

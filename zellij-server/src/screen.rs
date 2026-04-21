@@ -2092,6 +2092,7 @@ impl Screen {
                     watcher_state.set_force_render();
                 }
             }
+            self.broadcast_session_size_to_relay_watchers(new_screen_size);
             self.log_and_report_session_state()
                 .with_context(err_context)?;
             self.render(None).with_context(err_context)
@@ -3162,8 +3163,38 @@ impl Screen {
         let size = self.size;
         self.watcher_clients
             .insert(client_id, WatcherState::new_relay_fanout(size));
+        if let Some(os_input) = &self.bus.os_input {
+            let _ = os_input.send_to_client(
+                client_id,
+                ServerToClientMsg::SessionSize {
+                    rows: size.rows as u32,
+                    cols: size.cols as u32,
+                },
+            );
+        }
         self.render(None)?;
         Ok(())
+    }
+
+    /// Broadcast the current session-viewport size to every relay-fan-out
+    /// virtual watcher. Called from `resize_to_screen` so browser-side
+    /// clippers can re-emit against the fresh dimensions without any
+    /// additional plumbing.
+    fn broadcast_session_size_to_relay_watchers(&mut self, size: Size) {
+        let Some(os_input) = &self.bus.os_input else {
+            return;
+        };
+        for (client_id, watcher_state) in self.watcher_clients.iter() {
+            if watcher_state.is_relay_fanout() {
+                let _ = os_input.send_to_client(
+                    *client_id,
+                    ServerToClientMsg::SessionSize {
+                        rows: size.rows as u32,
+                        cols: size.cols as u32,
+                    },
+                );
+            }
+        }
     }
 
     pub fn remove_watcher_client(&mut self, client_id: ClientId) {

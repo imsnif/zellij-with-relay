@@ -214,6 +214,7 @@ impl From<ServerToClientMsg> for ClientInstruction {
             // Subscribe-only messages — not handled by regular interactive clients
             ServerToClientMsg::PaneRenderUpdate { .. } => ClientInstruction::UnblockInputThread,
             ServerToClientMsg::SubscribedPaneClosed { .. } => ClientInstruction::UnblockInputThread,
+            ServerToClientMsg::SessionSize { .. } => ClientInstruction::UnblockInputThread,
         }
     }
 }
@@ -639,6 +640,9 @@ pub async fn run_remote_client_terminal_loop(
                                 }
                             }
                             Ok(WebServerToWebClientControlMessage::SwitchedSession{ .. }) => {
+                                // no-op
+                            }
+                            Ok(WebServerToWebClientControlMessage::SessionSizeChanged { .. }) => {
                                 // no-op
                             }
                             Err(e) => {

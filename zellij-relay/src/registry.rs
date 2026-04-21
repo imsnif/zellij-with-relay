@@ -79,6 +79,11 @@ pub struct RoGroup {
     pub active_client_id: Option<u32>,
     pub e2e_encrypted: bool,
     pub viewer_ids: HashSet<Uuid>,
+    /// Most recent session viewport size pushed by the Zellij tunnel peer.
+    /// `None` until the first `SessionSize` arrives; `/session` stamps `0`
+    /// sentinels so the browser can lazy-update on the first
+    /// `SessionSizeChanged` JSON push.
+    pub session_size: Option<(u32, u32)>,
 }
 
 /// Metadata and wiring the relay keeps for an active tunnel.
@@ -265,6 +270,7 @@ mod tests {
                 active_client_id: Some(ro_group_client_id),
                 e2e_encrypted: true,
                 viewer_ids: [ro_viewer_a, ro_viewer_b].into_iter().collect(),
+                session_size: None,
             },
         );
         entry

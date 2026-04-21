@@ -153,6 +153,9 @@ export async function getClientId(token, rememberMe, hasAuthenticationCookie, ex
     return {
         webClientId: body.web_client_id,
         e2e,
+        isReadOnly: body.is_read_only === true,
+        sessionRows: Number(body.session_rows) || 0,
+        sessionCols: Number(body.session_cols) || 0,
     };
 }
 

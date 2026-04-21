@@ -28,6 +28,16 @@
           a mismatch blocks the login before any STDIN is transmitted.
         -->
         <input type="hidden" id="zellij-expected-e2e" value="EXPECTED_E2E" />
+        <!--
+          First-paint hints for r/o viewers. The server substitutes
+          "true"/"false" for IS_READ_ONLY and numeric strings for
+          SESSION_ROWS/SESSION_COLS. The viewer JS cross-checks these
+          against the /session response (which is authoritative) and
+          lazy-updates via `SessionSizeChanged` control messages.
+        -->
+        <input type="hidden" id="zellij-is-read-only" value="IS_READ_ONLY" />
+        <input type="hidden" id="zellij-session-rows" value="SESSION_ROWS" />
+        <input type="hidden" id="zellij-session-cols" value="SESSION_COLS" />
         <div id="terminal" tabindex="0"></div>
         <script src="assets/modals.js"></script>
         <!-- Module files - order matters -->

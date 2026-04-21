@@ -202,6 +202,48 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     }
                 }
             },
+            ControlMessage::SessionSize {
+                client_id,
+                rows,
+                cols,
+            } => {
+                let token_hash = reader_entry
+                    .client_id_to_token_hash
+                    .lock()
+                    .unwrap()
+                    .get(&client_id)
+                    .cloned();
+                let Some(token_hash) = token_hash else {
+                    tracing::debug!(
+                        slug = %reader_entry.slug,
+                        client_id,
+                        "SessionSize for unknown virtual watcher, dropping"
+                    );
+                    continue;
+                };
+                let viewer_ids = {
+                    let mut groups = reader_entry.ro_groups.lock().unwrap();
+                    let Some(group) = groups.get_mut(&token_hash) else {
+                        continue;
+                    };
+                    group.session_size = Some((rows, cols));
+                    group.viewer_ids.iter().copied().collect::<Vec<_>>()
+                };
+                let payload = serde_json::json!({
+                    "type": "SessionSizeChanged",
+                    "rows": rows,
+                    "cols": cols,
+                })
+                .to_string();
+                let viewers = reader_entry.viewers.lock().unwrap();
+                for vid in viewer_ids {
+                    if let Some(handle) = viewers.get(&vid) {
+                        if let Some(tx) = &handle.control_sink_tx {
+                            let _ = tx.send(Message::Text(payload.clone().into()));
+                        }
+                    }
+                }
+            },
             ControlMessage::ClientDisconnected { client_id } => {
                 // Locate the viewer(s) this `client_id` addresses — r/w
                 // (single viewer) or r/o group (all viewers) — then tear

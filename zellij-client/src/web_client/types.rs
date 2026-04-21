@@ -199,6 +199,11 @@ pub struct CreateClientIdResponse {
     /// Present regardless of the `e2e_encrypted` flag so the browser can
     /// always cache it (cheaply) and only use it when encryption is on.
     pub tunnel_id: String,
+    /// Sharer-side session viewport. `0` on the local path (no r/o
+    /// fan-out clipping applies); populated on the relay path for r/o
+    /// viewers so the browser clipper can initialise.
+    pub session_rows: u32,
+    pub session_cols: u32,
 }
 
 #[derive(Deserialize)]

@@ -21,6 +21,7 @@ message ServerToClientMsg {
     PaneRenderUpdateMsg pane_render_update = 14;
     SubscribedPaneClosedMsg subscribed_pane_closed = 15;
     ForwardQueryToHostMsg forward_query_to_host = 16;
+    SessionSizeMsg session_size = 17;
   }
 }
 
@@ -93,4 +94,10 @@ message SubscribedPaneClosedMsg {
 message ForwardQueryToHostMsg {
   uint32 token = 1;
   bytes query_bytes = 2;
+}
+// Delivered to relay-fan-out virtual watchers so the multiplexer can push
+// the current session-viewport size out to the relay.
+message SessionSizeMsg {
+  uint32 rows = 1;
+  uint32 cols = 2;
 }
