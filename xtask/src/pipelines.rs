@@ -32,6 +32,7 @@ pub fn make(sh: &Shell, flags: flags::Make) -> anyhow::Result<()> {
                     no_plugins: false,
                     plugins_only: false,
                     no_web: flags.no_web,
+                    wasm_clip: false,
                 },
             )
         })
@@ -67,6 +68,7 @@ pub fn install(sh: &Shell, flags: flags::Install) -> anyhow::Result<()> {
             no_plugins: false,
             plugins_only: true,
             no_web: flags.no_web,
+            wasm_clip: false,
         },
     )
     .and_then(|_| {
@@ -78,6 +80,7 @@ pub fn install(sh: &Shell, flags: flags::Install) -> anyhow::Result<()> {
                 no_plugins: true,
                 plugins_only: false,
                 no_web: flags.no_web,
+                wasm_clip: false,
             },
         )
     })
@@ -148,6 +151,7 @@ pub fn run(sh: &Shell, mut flags: flags::Run) -> anyhow::Result<()> {
                 no_plugins: false,
                 plugins_only: true,
                 no_web: flags.no_web,
+                wasm_clip: false,
             },
         )
         .and_then(|_| crate::cargo())
@@ -323,6 +327,7 @@ pub fn publish(sh: &Shell, flags: flags::Publish) -> anyhow::Result<()> {
                 no_plugins: false,
                 plugins_only: true,
                 no_web: false,
+                wasm_clip: false,
             },
         )
         .context(err_context)?;

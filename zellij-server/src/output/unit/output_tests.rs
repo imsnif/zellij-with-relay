@@ -1111,3 +1111,98 @@ fn test_pane_defaults_preserved_when_right_covered() {
         "Remaining chunk should preserve pane_default_bg"
     );
 }
+
+/// Generate the fidelity fixture consumed by `zellij-ansi-clip`'s
+/// `t17_fidelity_anchor_40x120`. Not run by default — invoke with:
+///
+/// ```bash
+/// cargo test -p zellij-server regenerate_clip_fixture -- --ignored --nocapture
+/// ```
+///
+/// The fixture is intentionally built against the real `serialize_with_size`
+/// pipeline so the clipper is exercised against bytes produced by the same
+/// serializer that will drive relay viewers in production. A deliberately
+/// varied set of SGR attributes, positions, and pane-bg segments is written so
+/// the clipper's SGR-diffing, EL/ED, and CUP handling all see traffic.
+#[test]
+#[ignore]
+fn regenerate_clip_fixture() {
+    use crate::panes::terminal_character::{RcCharacterStyles, DEFAULT_STYLES};
+    use std::io::Write as _;
+    use std::path::PathBuf;
+
+    let mut output = create_test_output();
+    let client_ids = create_test_clients(1);
+    let link_handler = Rc::new(RefCell::new(LinkHandler::new()));
+    output.add_clients(&client_ids, link_handler, None);
+
+    // Four 20x60 quadrants simulating a multi-pane tab. Each quadrant fills
+    // its rows with a pattern and a distinct style to exercise SGR diffing.
+    let rows = 40usize;
+    let cols = 120usize;
+
+    for y in 0..rows {
+        let chunk_width = cols;
+        let quadrant_row = y / 20;
+        let styles_for_quadrant = |q_col: usize| -> RcCharacterStyles {
+            let base = DEFAULT_STYLES;
+            let base = match (quadrant_row, q_col) {
+                (0, 0) => base
+                    .foreground(Some(AnsiCode::RgbCode((200, 60, 60))))
+                    .bold(Some(AnsiCode::On)),
+                (0, 1) => base
+                    .foreground(Some(AnsiCode::RgbCode((60, 200, 60))))
+                    .italic(Some(AnsiCode::On)),
+                (1, 0) => base
+                    .background(Some(AnsiCode::RgbCode((0, 26, 58))))
+                    .foreground(Some(AnsiCode::RgbCode((240, 240, 240)))),
+                _ => base.underline(Some(AnsiCode::Underline(None))),
+            };
+            RcCharacterStyles::from(base)
+        };
+
+        let mut chars: Vec<TerminalCharacter> = Vec::with_capacity(chunk_width);
+        for x in 0..chunk_width {
+            let q_col = x / 60;
+            let pattern = (b'!' + ((y + x) % 90) as u8) as char;
+            chars.push(TerminalCharacter::new_singlewidth_styled(
+                pattern,
+                styles_for_quadrant(q_col),
+            ));
+        }
+        let chunk = super::super::CharacterChunk::new(chars, 0, y);
+        output
+            .add_character_chunks_to_client(1, vec![chunk], None)
+            .unwrap();
+    }
+
+    let size = Size { rows, cols };
+    let serialized = output
+        .serialize_with_size(Some(size), Some(size))
+        .expect("serialize_with_size should succeed");
+    let bytes = serialized
+        .get(&1)
+        .expect("client 1 should have output")
+        .as_bytes();
+
+    let workspace_root: PathBuf = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("zellij-server has a parent dir")
+        .to_path_buf();
+    let fixture_path = workspace_root
+        .join("zellij-ansi-clip")
+        .join("tests")
+        .join("fixtures")
+        .join("full_session_40x120.ansi");
+
+    std::fs::create_dir_all(fixture_path.parent().unwrap())
+        .expect("create fixture directory");
+    let mut f = std::fs::File::create(&fixture_path).expect("create fixture file");
+    f.write_all(bytes).expect("write fixture bytes");
+    f.flush().expect("flush fixture");
+    eprintln!(
+        "wrote {} bytes to {}",
+        bytes.len(),
+        fixture_path.display()
+    );
+}

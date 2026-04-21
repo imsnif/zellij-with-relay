@@ -65,6 +65,7 @@ members = [
     "zellij-tile-utils",
     "zellij-relay-protocol",
     "zellij-relay",
+    "zellij-ansi-clip",
     "zellij-web-client-assets",
     "xtask",
     ".",
