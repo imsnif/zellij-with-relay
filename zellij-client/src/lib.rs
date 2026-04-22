@@ -442,26 +442,6 @@ pub(crate) enum InputInstruction {
     Exit,
 }
 
-/// Compact escape for log output — printable ASCII passes through,
-/// everything else becomes `\xNN`. Truncates to `limit` bytes and
-/// appends `…(+N more)` so log lines stay bounded.
-#[cfg(feature = "web_server_capability")]
-fn debug_escape(bytes: &[u8], limit: usize) -> String {
-    let n = bytes.len().min(limit);
-    let mut s = String::with_capacity(n * 4);
-    for &b in &bytes[..n] {
-        match b {
-            0x20..=0x7e if b != b'\\' => s.push(b as char),
-            b'\\' => s.push_str("\\\\"),
-            _ => s.push_str(&format!("\\x{:02x}", b)),
-        }
-    }
-    if bytes.len() > n {
-        s.push_str(&format!("…(+{} more)", bytes.len() - n));
-    }
-    s
-}
-
 #[cfg(feature = "web_server_capability")]
 pub async fn run_remote_client_terminal_loop(
     os_input: Box<dyn ClientOsApi>,
@@ -474,13 +454,6 @@ pub async fn run_remote_client_terminal_loop(
     // resizes are suppressed (the relay drops the former at its side,
     // and the sharer's viewport is authoritative for size).
     let is_read_only = attached.is_read_only;
-    if is_read_only {
-        log::info!(
-            "[phase5-ro] terminal loop starting; initial session_rows={} session_cols={}",
-            attached.session_rows,
-            attached.session_cols,
-        );
-    }
     // `0` is the relay's cold-start sentinel for fresh r/o fan-out
     // groups whose `SessionSize` has not yet been observed. Mirrors
     // the browser's `sessionRows || 24` / `sessionCols || 80` default
@@ -605,21 +578,9 @@ pub async fn run_remote_client_terminal_loop(
                             // Zero outbound traffic. Mirrors the browser
                             // path in `websockets.js::setupResizeHandler`.
                             if let Some(clip) = clipper.as_mut() {
-                                let (cur_r, cur_c) = clip.cursor_position();
-                                let (sess_r, sess_c) = clip.session_size();
                                 let emitted = clip.emit(
                                     new_size.rows as u16,
                                     new_size.cols as u16,
-                                );
-                                log::info!(
-                                    "[phase5-ro] SIGWINCH local resize: new_term=({},{}) \
-                                     sess=({},{}) cursor=({},{}) emitted={}B emit_tail=\"{}\"",
-                                    new_size.rows, new_size.cols,
-                                    sess_r, sess_c, cur_r, cur_c, emitted.len(),
-                                    debug_escape(
-                                        &emitted[emitted.len().saturating_sub(80)..],
-                                        80,
-                                    ),
                                 );
                                 let mut stdout = os_input.get_stdout_writer();
                                 if let Some(sync) = synchronised_output {
@@ -699,38 +660,9 @@ pub async fn run_remote_client_terminal_loop(
                         // bytes verbatim. Mirrors the browser path in
                         // `websockets.js::wsTerminal.onmessage`.
                         let output: Vec<u8> = if let Some(clip) = clipper.as_mut() {
-                            let (cur_row_before, cur_col_before) = clip.cursor_position();
-                            let cur_visible_before = clip.cursor_is_visible();
-                            let (sess_rows, sess_cols) = clip.session_size();
                             clip.apply_chunk(&decrypted);
-                            let (cur_row_after, cur_col_after) = clip.cursor_position();
-                            let cur_visible_after = clip.cursor_is_visible();
                             let term_size = os_input.get_terminal_size();
-                            let emitted = clip.emit(
-                                term_size.rows as u16,
-                                term_size.cols as u16,
-                            );
-                            log::info!(
-                                "[phase5-ro] binary frame: decrypted={}B sess=({},{}) term=({},{}) \
-                                 cursor before=({},{},vis={}) after=({},{},vis={}) emitted={}B \
-                                 decrypted_head=\"{}\" decrypted_tail=\"{}\" emit_tail=\"{}\"",
-                                decrypted.len(),
-                                sess_rows, sess_cols,
-                                term_size.rows, term_size.cols,
-                                cur_row_before, cur_col_before, cur_visible_before,
-                                cur_row_after, cur_col_after, cur_visible_after,
-                                emitted.len(),
-                                debug_escape(&decrypted[..decrypted.len().min(120)], 120),
-                                debug_escape(
-                                    &decrypted[decrypted.len().saturating_sub(200)..],
-                                    200,
-                                ),
-                                debug_escape(
-                                    &emitted[emitted.len().saturating_sub(80)..],
-                                    80,
-                                ),
-                            );
-                            emitted
+                            clip.emit(term_size.rows as u16, term_size.cols as u16)
                         } else {
                             decrypted
                         };
@@ -802,29 +734,11 @@ pub async fn run_remote_client_terminal_loop(
                                 // ignore the message (the sharer does not
                                 // receive size updates from itself).
                                 if let Some(clip) = clipper.as_mut() {
-                                    let (cur_r, cur_c) = clip.cursor_position();
-                                    let (sess_r, sess_c) = clip.session_size();
-                                    log::info!(
-                                        "[phase5-ro] SessionSizeChanged rx rows={} cols={}; \
-                                         prev sess=({},{}) cursor=({},{})",
-                                        rows, cols, sess_r, sess_c, cur_r, cur_c,
-                                    );
                                     clip.resize_session(rows as u16, cols as u16);
                                     let term_size = os_input.get_terminal_size();
                                     let emitted = clip.emit(
                                         term_size.rows as u16,
                                         term_size.cols as u16,
-                                    );
-                                    let (cur_r2, cur_c2) = clip.cursor_position();
-                                    log::info!(
-                                        "[phase5-ro] SessionSizeChanged post-resize: new sess=({},{}) \
-                                         cursor=({},{}) term=({},{}) emitted={}B emit_tail=\"{}\"",
-                                        rows, cols, cur_r2, cur_c2,
-                                        term_size.rows, term_size.cols, emitted.len(),
-                                        debug_escape(
-                                            &emitted[emitted.len().saturating_sub(80)..],
-                                            80,
-                                        ),
                                     );
                                     let mut stdout = os_input.get_stdout_writer();
                                     if let Some(sync) = synchronised_output {
