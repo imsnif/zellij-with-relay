@@ -442,6 +442,26 @@ pub(crate) enum InputInstruction {
     Exit,
 }
 
+/// Compact escape for log output — printable ASCII passes through,
+/// everything else becomes `\xNN`. Truncates to `limit` bytes and
+/// appends `…(+N more)` so log lines stay bounded.
+#[cfg(feature = "web_server_capability")]
+fn debug_escape(bytes: &[u8], limit: usize) -> String {
+    let n = bytes.len().min(limit);
+    let mut s = String::with_capacity(n * 4);
+    for &b in &bytes[..n] {
+        match b {
+            0x20..=0x7e if b != b'\\' => s.push(b as char),
+            b'\\' => s.push_str("\\\\"),
+            _ => s.push_str(&format!("\\x{:02x}", b)),
+        }
+    }
+    if bytes.len() > n {
+        s.push_str(&format!("…(+{} more)", bytes.len() - n));
+    }
+    s
+}
+
 #[cfg(feature = "web_server_capability")]
 pub async fn run_remote_client_terminal_loop(
     os_input: Box<dyn ClientOsApi>,
@@ -449,6 +469,41 @@ pub async fn run_remote_client_terminal_loop(
 ) -> Result<Option<ConnectToSession>, RemoteClientError> {
     let mut connections = attached.connections;
     let e2e_key = attached.e2e_key;
+    // Phase 5: on r/o attach the terminal stream is clipped to the
+    // local viewport rather than written out raw, and STDIN / outbound
+    // resizes are suppressed (the relay drops the former at its side,
+    // and the sharer's viewport is authoritative for size).
+    let is_read_only = attached.is_read_only;
+    if is_read_only {
+        log::info!(
+            "[phase5-ro] terminal loop starting; initial session_rows={} session_cols={}",
+            attached.session_rows,
+            attached.session_cols,
+        );
+    }
+    // `0` is the relay's cold-start sentinel for fresh r/o fan-out
+    // groups whose `SessionSize` has not yet been observed. Mirrors
+    // the browser's `sessionRows || 24` / `sessionCols || 80` default
+    // (`zellij-web-client-assets/assets/websockets.js:44`). The first
+    // `SessionSizeChanged` from the relay corrects these.
+    let initial_session_rows: u16 = if attached.session_rows == 0 {
+        24
+    } else {
+        attached.session_rows as u16
+    };
+    let initial_session_cols: u16 = if attached.session_cols == 0 {
+        80
+    } else {
+        attached.session_cols as u16
+    };
+    let mut clipper: Option<zellij_ansi_clip::ClipState> = if is_read_only {
+        Some(zellij_ansi_clip::ClipState::new(
+            initial_session_rows,
+            initial_session_cols,
+        ))
+    } else {
+        None
+    };
     use crate::os_input_output::{AsyncSignals, AsyncStdin};
 
     let synchronised_output = match os_input.env_variable("TERM").as_deref() {
@@ -471,14 +526,18 @@ pub async fn run_remote_client_terminal_loop(
         )
     };
 
-    // send size on startup
-    let new_size = os_input.get_terminal_size();
-    if let Err(e) = connections
-        .control_ws
-        .send(create_resize_message(new_size))
-        .await
-    {
-        log::error!("Failed to send resize message: {}", e);
+    // send size on startup (r/w only — r/o viewers do not propagate
+    // their viewport; the sharer's session size is authoritative and
+    // flows in the opposite direction as `SessionSizeChanged`).
+    if !is_read_only {
+        let new_size = os_input.get_terminal_size();
+        if let Err(e) = connections
+            .control_ws
+            .send(create_resize_message(new_size))
+            .await
+        {
+            log::error!("Failed to send resize message: {}", e);
+        }
     }
 
     // Phase 3 client-commitment rule: under E2E, no STDIN byte may be
@@ -487,14 +546,24 @@ pub async fn run_remote_client_terminal_loop(
     // flag; in the non-E2E path it starts unlocked. Stdin back-pressure
     // is handled naturally — the tokio::select! branch simply becomes
     // uninterested in the stdin future until the flag flips.
-    let mut stdin_unlocked = e2e_key.is_none();
+    // Phase 5: r/o viewers must never send STDIN, so the flag starts
+    // locked and never flips for them.
+    let mut stdin_unlocked = e2e_key.is_none() && !is_read_only;
 
     loop {
         tokio::select! {
-            // Handle stdin input (gated under E2E until first clean decrypt).
-            result = async_stdin.read(), if stdin_unlocked => {
+            // Handle stdin input (gated under E2E until first clean decrypt;
+            // r/o viewers never transmit so the arm is permanently closed).
+            result = async_stdin.read(), if stdin_unlocked && !is_read_only => {
                 match result {
                     Ok(buf) if !buf.is_empty() => {
+                        // Defense-in-depth: the `if` guard above already
+                        // closes this arm on r/o. The relay also drops r/o
+                        // input before it reaches Zellij. Drop-and-continue
+                        // here is the belt over the braces.
+                        if is_read_only {
+                            continue;
+                        }
                         // With E2E on, encrypt before sending; the server
                         // decrypts with the same key it derived at auth
                         // time. See `derive_e2e_key_if_needed` for the
@@ -530,7 +599,45 @@ pub async fn run_remote_client_terminal_loop(
                 match signal {
                     crate::os_input_output::SignalEvent::Resize => {
                         let new_size = os_input.get_terminal_size();
-                        if let Err(e) = connections.control_ws.send(create_resize_message(new_size)).await {
+                        if is_read_only {
+                            // R/O: re-clip the cached session frame to
+                            // the new local viewport and paint it.
+                            // Zero outbound traffic. Mirrors the browser
+                            // path in `websockets.js::setupResizeHandler`.
+                            if let Some(clip) = clipper.as_mut() {
+                                let (cur_r, cur_c) = clip.cursor_position();
+                                let (sess_r, sess_c) = clip.session_size();
+                                let emitted = clip.emit(
+                                    new_size.rows as u16,
+                                    new_size.cols as u16,
+                                );
+                                log::info!(
+                                    "[phase5-ro] SIGWINCH local resize: new_term=({},{}) \
+                                     sess=({},{}) cursor=({},{}) emitted={}B emit_tail=\"{}\"",
+                                    new_size.rows, new_size.cols,
+                                    sess_r, sess_c, cur_r, cur_c, emitted.len(),
+                                    debug_escape(
+                                        &emitted[emitted.len().saturating_sub(80)..],
+                                        80,
+                                    ),
+                                );
+                                let mut stdout = os_input.get_stdout_writer();
+                                if let Some(sync) = synchronised_output {
+                                    stdout
+                                        .write_all(sync.start_seq())
+                                        .expect("cannot write to stdout");
+                                }
+                                stdout
+                                    .write_all(&emitted)
+                                    .expect("cannot write to stdout");
+                                if let Some(sync) = synchronised_output {
+                                    stdout
+                                        .write_all(sync.end_seq())
+                                        .expect("cannot write to stdout");
+                                }
+                                stdout.flush().expect("could not flush");
+                            }
+                        } else if let Err(e) = connections.control_ws.send(create_resize_message(new_size)).await {
                             log::error!("Failed to send resize message: {}", e);
                             break;
                         }
@@ -581,8 +688,52 @@ pub async fn run_remote_client_terminal_loop(
                         };
                         // First clean decrypt under E2E unlocks stdin
                         // transmission. In the non-E2E path this is a
-                        // no-op — the flag started `true`.
+                        // no-op — the flag started `true`. R/O viewers
+                        // never unlock (the STDIN arm is gated
+                        // independently on `!is_read_only`).
                         stdin_unlocked = true;
+                        // Phase 5: on r/o, feed the decrypted ANSI into
+                        // the viewport clipper and emit a normalised
+                        // stream sized for this viewer. On r/w (or
+                        // non-relay web clients) write the decrypted
+                        // bytes verbatim. Mirrors the browser path in
+                        // `websockets.js::wsTerminal.onmessage`.
+                        let output: Vec<u8> = if let Some(clip) = clipper.as_mut() {
+                            let (cur_row_before, cur_col_before) = clip.cursor_position();
+                            let cur_visible_before = clip.cursor_is_visible();
+                            let (sess_rows, sess_cols) = clip.session_size();
+                            clip.apply_chunk(&decrypted);
+                            let (cur_row_after, cur_col_after) = clip.cursor_position();
+                            let cur_visible_after = clip.cursor_is_visible();
+                            let term_size = os_input.get_terminal_size();
+                            let emitted = clip.emit(
+                                term_size.rows as u16,
+                                term_size.cols as u16,
+                            );
+                            log::info!(
+                                "[phase5-ro] binary frame: decrypted={}B sess=({},{}) term=({},{}) \
+                                 cursor before=({},{},vis={}) after=({},{},vis={}) emitted={}B \
+                                 decrypted_head=\"{}\" decrypted_tail=\"{}\" emit_tail=\"{}\"",
+                                decrypted.len(),
+                                sess_rows, sess_cols,
+                                term_size.rows, term_size.cols,
+                                cur_row_before, cur_col_before, cur_visible_before,
+                                cur_row_after, cur_col_after, cur_visible_after,
+                                emitted.len(),
+                                debug_escape(&decrypted[..decrypted.len().min(120)], 120),
+                                debug_escape(
+                                    &decrypted[decrypted.len().saturating_sub(200)..],
+                                    200,
+                                ),
+                                debug_escape(
+                                    &emitted[emitted.len().saturating_sub(80)..],
+                                    80,
+                                ),
+                            );
+                            emitted
+                        } else {
+                            decrypted
+                        };
                         let mut stdout = os_input.get_stdout_writer();
                         if let Some(sync) = synchronised_output {
                             stdout
@@ -590,7 +741,7 @@ pub async fn run_remote_client_terminal_loop(
                                 .expect("cannot write to stdout");
                         }
                         stdout
-                            .write_all(&decrypted)
+                            .write_all(&output)
                             .expect("cannot write to stdout");
                         if let Some(sync) = synchronised_output {
                             stdout
@@ -642,8 +793,55 @@ pub async fn run_remote_client_terminal_loop(
                             Ok(WebServerToWebClientControlMessage::SwitchedSession{ .. }) => {
                                 // no-op
                             }
-                            Ok(WebServerToWebClientControlMessage::SessionSizeChanged { .. }) => {
-                                // no-op
+                            Ok(WebServerToWebClientControlMessage::SessionSizeChanged { rows, cols }) => {
+                                // Phase 5: r/o viewers resize the clipper's
+                                // virtual session grid and repaint. Mirrors
+                                // the browser handler in
+                                // `websockets.js::startWsControl`'s
+                                // `SessionSizeChanged` branch. r/w viewers
+                                // ignore the message (the sharer does not
+                                // receive size updates from itself).
+                                if let Some(clip) = clipper.as_mut() {
+                                    let (cur_r, cur_c) = clip.cursor_position();
+                                    let (sess_r, sess_c) = clip.session_size();
+                                    log::info!(
+                                        "[phase5-ro] SessionSizeChanged rx rows={} cols={}; \
+                                         prev sess=({},{}) cursor=({},{})",
+                                        rows, cols, sess_r, sess_c, cur_r, cur_c,
+                                    );
+                                    clip.resize_session(rows as u16, cols as u16);
+                                    let term_size = os_input.get_terminal_size();
+                                    let emitted = clip.emit(
+                                        term_size.rows as u16,
+                                        term_size.cols as u16,
+                                    );
+                                    let (cur_r2, cur_c2) = clip.cursor_position();
+                                    log::info!(
+                                        "[phase5-ro] SessionSizeChanged post-resize: new sess=({},{}) \
+                                         cursor=({},{}) term=({},{}) emitted={}B emit_tail=\"{}\"",
+                                        rows, cols, cur_r2, cur_c2,
+                                        term_size.rows, term_size.cols, emitted.len(),
+                                        debug_escape(
+                                            &emitted[emitted.len().saturating_sub(80)..],
+                                            80,
+                                        ),
+                                    );
+                                    let mut stdout = os_input.get_stdout_writer();
+                                    if let Some(sync) = synchronised_output {
+                                        stdout
+                                            .write_all(sync.start_seq())
+                                            .expect("cannot write to stdout");
+                                    }
+                                    stdout
+                                        .write_all(&emitted)
+                                        .expect("cannot write to stdout");
+                                    if let Some(sync) = synchronised_output {
+                                        stdout
+                                            .write_all(sync.end_seq())
+                                            .expect("cannot write to stdout");
+                                    }
+                                    stdout.flush().expect("could not flush");
+                                }
                             }
                             Err(e) => {
                                 log::error!("Failed to deserialize control message: {}", e);

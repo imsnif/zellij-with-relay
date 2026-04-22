@@ -29,6 +29,12 @@ serial_test = "3.0"
 tokio-tungstenite = "0.20"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies"] }
 
+[features]
+# Bundle the live `target/` clip.wasm build artefact instead of the
+# committed one. Useful during iteration — avoids a commit after every
+# edit to `zellij-ansi-clip`. Mirrors the cascade in the root crate.
+clip_wasm_from_target = ["zellij-web-client-assets/clip_wasm_from_target"]
+
 [[bin]]
 name = "zellij-relay"
 path = "src/main.rs"

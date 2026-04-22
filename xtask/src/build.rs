@@ -24,9 +24,10 @@ pub fn build(sh: &Shell, flags: flags::Build) -> anyhow::Result<()> {
 
     if flags.wasm_clip {
         // Short-circuit: `cargo x build --wasm-clip` only builds the clip wasm
-        // blob. This avoids pulling in the full workspace build on every
-        // iteration while the clipper is being developed.
-        return build_wasm_clip(sh, flags.release);
+        // blob AND stages it to the committed assets. This is the path used
+        // by the release pipeline (`xtask pipelines::publish`) and by manual
+        // invocations that want to refresh the committed blob.
+        return build_wasm_clip(sh, flags.release, /* stage_to_assets */ true);
     }
 
     // zellij-utils requires protobuf definition files to be present. Usually these are
@@ -74,6 +75,21 @@ pub fn build(sh: &Shell, flags: flags::Build) -> anyhow::Result<()> {
                     move_plugin_to_assets(sh, plugin_name)?;
                 }
             }
+        }
+
+        // Build the ansi-clip wasm blob alongside the plugins when web is
+        // enabled. The output lives at
+        // `target/wasm32-unknown-unknown/release/zellij_ansi_clip.wasm`, which
+        // is where `zellij-web-client-assets/clip_wasm_from_target` (enabled
+        // by the root crate's default feature set) reads from at compile
+        // time. Release pipelines (`xtask pipelines::publish`) refresh the
+        // committed blob via the `wasm_clip: true` early-return path above.
+        // This mirrors the plugins flow: dev builds stream through `target/`,
+        // release pipelines stage to `assets/`.
+        if !flags.no_web {
+            // Always release mode — `clip_wasm_from_target` hard-codes the
+            // `release/` path in its include_bytes!.
+            build_wasm_clip(sh, /* release */ true, /* stage_to_assets */ false)?;
         }
     }
 
@@ -193,13 +209,25 @@ fn run_proto_codegen(sh: &Shell) {
     }
 }
 
-/// Build the `zellij-ansi-clip` crate for the `wasm32-unknown-unknown` target,
-/// then copy the resulting wasm blob into `zellij-web-client-assets/assets/clip.wasm`.
-/// Optionally runs `wasm-opt -Oz` if available.
+/// Build the `zellij-ansi-clip` crate for the `wasm32-unknown-unknown` target.
+/// If `stage_to_assets` is true, copies the resulting blob into
+/// `zellij-web-client-assets/assets/clip.wasm` (optionally through `wasm-opt`).
+/// Otherwise only the raw `target/wasm32-unknown-unknown/<profile>/…wasm` is
+/// produced — which is what the `clip_wasm_from_target` feature in
+/// `zellij-web-client-assets` `include_bytes!`es from.
 ///
-/// Invoked from `cargo x build --wasm-clip`. Not part of the default build —
-/// requires the `wasm32-unknown-unknown` Rust target.
-pub fn build_wasm_clip(sh: &Shell, release: bool) -> anyhow::Result<()> {
+/// Invoked from:
+/// - `cargo x build --wasm-clip`: stage_to_assets=true, release=per-flag.
+/// - Normal `cargo x build` / `cargo x run`: stage_to_assets=false, release=true
+///   (the `clip_wasm_from_target` feature expects the release path).
+/// - Release pipeline (`xtask pipelines::publish`): stage_to_assets=true.
+///
+/// Requires the `wasm32-unknown-unknown` Rust target.
+pub fn build_wasm_clip(
+    sh: &Shell,
+    release: bool,
+    stage_to_assets: bool,
+) -> anyhow::Result<()> {
     let _pd = sh.push_dir(crate::project_root());
 
     println!();
@@ -237,6 +265,14 @@ pub fn build_wasm_clip(sh: &Shell, release: bool) -> anyhow::Result<()> {
             "expected wasm artefact at '{}' after build",
             wasm_src.display()
         ));
+    }
+
+    if !stage_to_assets {
+        println!(
+            ">> clip.wasm built at {} (not staged to committed assets)",
+            wasm_src.display()
+        );
+        return Ok(());
     }
 
     let dst_dir = crate::project_root()

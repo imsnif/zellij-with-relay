@@ -782,3 +782,251 @@ async fn test_control_message_handling() {
         .expect("Loop didn't exit")
         .unwrap();
 }
+
+// --- Phase 5 read-only attach tests ---
+//
+// These exercise the r/o-specific branches introduced in Phase 5:
+// inbound Binary goes through the `zellij-ansi-clip` viewport clipper
+// before reaching stdout; SIGWINCH produces zero outbound control-WS
+// traffic (the clipper re-emits locally instead); `SessionSizeChanged`
+// on the control WS triggers a stdout write even without any prior
+// terminal frame. The clipper construction happens unconditionally
+// when `is_read_only` is true — no E2E key is required.
+
+#[tokio::test]
+#[serial]
+async fn ro_inbound_binary_routes_through_clipper() {
+    let (port, server, _server_handle) = mock_ws_server::MockWsServer::start().await;
+
+    let terminal_url = format!("ws://127.0.0.1:{}/ws/terminal", port);
+    let control_url = format!("ws://127.0.0.1:{}/ws/control", port);
+
+    let terminal_tcp = TcpStream::connect(format!("127.0.0.1:{}", port))
+        .await
+        .unwrap();
+    let (terminal_ws, _) = tokio_tungstenite::client_async_with_config(
+        &terminal_url,
+        MaybeTls::Plain(terminal_tcp),
+        None,
+    )
+    .await
+    .unwrap();
+    let control_tcp = TcpStream::connect(format!("127.0.0.1:{}", port))
+        .await
+        .unwrap();
+    let (control_ws, _) = tokio_tungstenite::client_async_with_config(
+        &control_url,
+        MaybeTls::Plain(control_tcp),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let connections = WebSocketConnections {
+        terminal_ws,
+        control_ws,
+        web_client_id: "test-ro-clip".to_string(),
+    };
+
+    let (_stdin_tx, stdin_rx) = mpsc::unbounded_channel();
+    let (_signal_tx, signal_rx) = mpsc::unbounded_channel();
+
+    let os_input = TestClientOsApi::new(stdin_rx, signal_rx);
+    let stdout_buffer = os_input.stdout_buffer.clone();
+    let os_input = Box::new(os_input);
+
+    // Construct an r/o AttachedSession at the default 24x80 session size.
+    let attached = crate::remote_attach::AttachedSession::plain_read_only(connections, 24, 80);
+    let loop_handle =
+        tokio::spawn(async move { run_remote_client_terminal_loop(os_input, attached).await });
+
+    // A plain ASCII payload is a valid ANSI stream. The clipper will
+    // parse it, absorb it into its grid, and emit a normalised stream
+    // that includes SGR / CUP framing. The emitted stream therefore
+    // differs from the raw input, which is the signal we're after.
+    let raw = b"hello from read-only".to_vec();
+    server
+        .terminal_to_client_tx
+        .send(Message::Binary(raw.clone()))
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let stdout = stdout_buffer.lock().unwrap().clone();
+    assert!(
+        !stdout.is_empty(),
+        "expected clipper to emit bytes to stdout on r/o",
+    );
+    assert_ne!(
+        stdout, raw,
+        "r/o stdout should be the clipper's normalised emit, not the raw decrypted bytes"
+    );
+
+    // The raw payload still ought to be present within the emitted
+    // stream — the clipper paints the characters we fed it.
+    let stdout_str = String::from_utf8_lossy(&stdout);
+    assert!(
+        stdout_str.contains("hello from read-only"),
+        "clipper emit should contain the painted characters, got: {:?}",
+        stdout_str
+    );
+
+    server
+        .terminal_to_client_tx
+        .send(Message::Close(None))
+        .unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(2), loop_handle)
+        .await
+        .expect("Loop didn't exit")
+        .unwrap();
+}
+
+#[tokio::test]
+#[serial]
+async fn ro_sigwinch_emits_no_control_ws_traffic() {
+    let (port, server, _server_handle) = mock_ws_server::MockWsServer::start().await;
+
+    let terminal_url = format!("ws://127.0.0.1:{}/ws/terminal", port);
+    let control_url = format!("ws://127.0.0.1:{}/ws/control", port);
+
+    let terminal_tcp = TcpStream::connect(format!("127.0.0.1:{}", port))
+        .await
+        .unwrap();
+    let (terminal_ws, _) = tokio_tungstenite::client_async_with_config(
+        &terminal_url,
+        MaybeTls::Plain(terminal_tcp),
+        None,
+    )
+    .await
+    .unwrap();
+    let control_tcp = TcpStream::connect(format!("127.0.0.1:{}", port))
+        .await
+        .unwrap();
+    let (control_ws, _) = tokio_tungstenite::client_async_with_config(
+        &control_url,
+        MaybeTls::Plain(control_tcp),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let connections = WebSocketConnections {
+        terminal_ws,
+        control_ws,
+        web_client_id: "test-ro-sigwinch".to_string(),
+    };
+
+    let (_stdin_tx, stdin_rx) = mpsc::unbounded_channel();
+    let (signal_tx, signal_rx) = mpsc::unbounded_channel();
+
+    let os_input = Box::new(TestClientOsApi::new(stdin_rx, signal_rx));
+
+    let attached = crate::remote_attach::AttachedSession::plain_read_only(connections, 24, 80);
+    let loop_handle =
+        tokio::spawn(async move { run_remote_client_terminal_loop(os_input, attached).await });
+
+    // Give the loop time to start. On r/o the startup resize send is
+    // suppressed, so nothing should land on control_ws yet.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert!(
+        server.client_to_control_rx.lock().unwrap().try_recv().is_err(),
+        "r/o startup must not send a resize message"
+    );
+
+    // Fire a SIGWINCH; r/o should re-clip locally and send nothing.
+    signal_tx.send(SignalEvent::Resize).unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert!(
+        server.client_to_control_rx.lock().unwrap().try_recv().is_err(),
+        "r/o SIGWINCH must not emit any outbound control-WS traffic"
+    );
+
+    signal_tx.send(SignalEvent::Quit).unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(2), loop_handle)
+        .await
+        .expect("Loop didn't exit")
+        .unwrap();
+}
+
+#[tokio::test]
+#[serial]
+async fn ro_session_size_changed_triggers_stdout_write() {
+    let (port, server, _server_handle) = mock_ws_server::MockWsServer::start().await;
+
+    let terminal_url = format!("ws://127.0.0.1:{}/ws/terminal", port);
+    let control_url = format!("ws://127.0.0.1:{}/ws/control", port);
+
+    let terminal_tcp = TcpStream::connect(format!("127.0.0.1:{}", port))
+        .await
+        .unwrap();
+    let (terminal_ws, _) = tokio_tungstenite::client_async_with_config(
+        &terminal_url,
+        MaybeTls::Plain(terminal_tcp),
+        None,
+    )
+    .await
+    .unwrap();
+    let control_tcp = TcpStream::connect(format!("127.0.0.1:{}", port))
+        .await
+        .unwrap();
+    let (control_ws, _) = tokio_tungstenite::client_async_with_config(
+        &control_url,
+        MaybeTls::Plain(control_tcp),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let connections = WebSocketConnections {
+        terminal_ws,
+        control_ws,
+        web_client_id: "test-ro-size".to_string(),
+    };
+
+    let (_stdin_tx, stdin_rx) = mpsc::unbounded_channel();
+    let (_signal_tx, signal_rx) = mpsc::unbounded_channel();
+
+    let os_input = TestClientOsApi::new(stdin_rx, signal_rx);
+    let stdout_buffer = os_input.stdout_buffer.clone();
+    let os_input = Box::new(os_input);
+
+    // Start the clipper at the fallback 24x80 — the test exercises the
+    // `SessionSizeChanged` path by bumping it to a different size and
+    // confirming the emit fires without any prior `apply_chunk`.
+    let attached = crate::remote_attach::AttachedSession::plain_read_only(connections, 24, 80);
+    let loop_handle =
+        tokio::spawn(async move { run_remote_client_terminal_loop(os_input, attached).await });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        stdout_buffer.lock().unwrap().is_empty(),
+        "stdout should be empty before SessionSizeChanged"
+    );
+
+    let msg = WebServerToWebClientControlMessage::SessionSizeChanged {
+        rows: 40,
+        cols: 120,
+    };
+    server
+        .control_to_client_tx
+        .send(Message::Text(serde_json::to_string(&msg).unwrap()))
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    assert!(
+        !stdout_buffer.lock().unwrap().is_empty(),
+        "SessionSizeChanged must trigger a clipper emit to stdout even without any prior frame"
+    );
+
+    server
+        .terminal_to_client_tx
+        .send(Message::Close(None))
+        .unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(2), loop_handle)
+        .await
+        .expect("Loop didn't exit")
+        .unwrap();
+}

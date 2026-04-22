@@ -21,6 +21,18 @@ pub struct SessionResponse {
     /// pre-Phase-3 servers.
     #[serde(default)]
     pub tunnel_id: Option<String>,
+    /// Whether this viewer attached with a read-only token. Absent for
+    /// pre-Phase-5 servers; treated as `false`.
+    #[serde(default)]
+    pub is_read_only: bool,
+    /// Sharer's session viewport rows. Relay stamps `0` when the r/o
+    /// fan-out group has not yet received a `SessionSize` frame; callers
+    /// should fall back to `24`.
+    #[serde(default)]
+    pub session_rows: u32,
+    /// Sharer's session viewport cols. `0` sentinel — see `session_rows`.
+    #[serde(default)]
+    pub session_cols: u32,
 }
 
 /// Bundle returned to the attach caller: enough to establish WS
@@ -34,6 +46,9 @@ pub struct AuthResult {
     pub remembered: Option<RememberedCookie>,
     pub e2e_encrypted: bool,
     pub tunnel_id: Option<String>,
+    pub is_read_only: bool,
+    pub session_rows: u32,
+    pub session_cols: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +151,9 @@ pub async fn authenticate(
         remembered,
         e2e_encrypted: session_data.e2e_encrypted,
         tunnel_id: session_data.tunnel_id,
+        is_read_only: session_data.is_read_only,
+        session_rows: session_data.session_rows,
+        session_cols: session_data.session_cols,
     })
 }
 
@@ -196,5 +214,43 @@ pub async fn validate_session_token(
                 .map_err(|e| RemoteClientError::Other(Box::new(e)))?;
             Ok((session_data, http_client))
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SessionResponse;
+
+    #[test]
+    fn session_response_deserializes_phase_5_fields() {
+        let body = r#"{
+            "web_client_id": "relay-client-0",
+            "e2e_encrypted": true,
+            "tunnel_id": "abcd",
+            "is_read_only": true,
+            "session_rows": 40,
+            "session_cols": 120
+        }"#;
+        let s: SessionResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(s.web_client_id, "relay-client-0");
+        assert!(s.e2e_encrypted);
+        assert_eq!(s.tunnel_id.as_deref(), Some("abcd"));
+        assert!(s.is_read_only);
+        assert_eq!(s.session_rows, 40);
+        assert_eq!(s.session_cols, 120);
+    }
+
+    #[test]
+    fn session_response_defaults_phase_5_fields_when_absent() {
+        // Pre-Phase-5 body: no is_read_only / session_rows / session_cols.
+        let body = r#"{
+            "web_client_id": "relay-client-0",
+            "e2e_encrypted": true,
+            "tunnel_id": "abcd"
+        }"#;
+        let s: SessionResponse = serde_json::from_str(body).unwrap();
+        assert!(!s.is_read_only);
+        assert_eq!(s.session_rows, 0);
+        assert_eq!(s.session_cols, 0);
     }
 }

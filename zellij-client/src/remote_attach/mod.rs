@@ -24,6 +24,17 @@ pub struct AttachedSession {
     /// decrypt inbound frames with this key. `None` means plaintext.
     pub e2e_key: Option<[u8; crypto::KEY_LEN]>,
     pub e2e_encrypted: bool,
+    /// True when the server authenticated this viewer with a read-only
+    /// token. The terminal loop must not transmit STDIN nor outbound
+    /// `TerminalResize` in that case; instead it runs inbound bytes
+    /// through the `zellij-ansi-clip` viewport clipper.
+    pub is_read_only: bool,
+    /// Sharer's session viewport rows reported by the server at
+    /// attach time. `0` is the relay's cold-start sentinel — the
+    /// loop falls back to `24` until the first `SessionSizeChanged`.
+    pub session_rows: u32,
+    /// Sharer's session viewport cols. `0` sentinel — fall back to `80`.
+    pub session_cols: u32,
 }
 
 impl AttachedSession {
@@ -35,6 +46,28 @@ impl AttachedSession {
             connections,
             e2e_key: None,
             e2e_encrypted: false,
+            is_read_only: false,
+            session_rows: 0,
+            session_cols: 0,
+        }
+    }
+
+    /// Wrap plain connections for a read-only viewer at the given
+    /// sharer session size. Used by Phase 5 tests exercising the
+    /// viewport-clipper path in the terminal loop.
+    #[cfg(test)]
+    pub fn plain_read_only(
+        connections: WebSocketConnections,
+        session_rows: u32,
+        session_cols: u32,
+    ) -> Self {
+        Self {
+            connections,
+            e2e_key: None,
+            e2e_encrypted: false,
+            is_read_only: true,
+            session_rows,
+            session_cols,
         }
     }
 }
@@ -434,6 +467,9 @@ async fn remote_attach(
         connections,
         e2e_key,
         e2e_encrypted: auth_result.e2e_encrypted,
+        is_read_only: auth_result.is_read_only,
+        session_rows: auth_result.session_rows,
+        session_cols: auth_result.session_cols,
     };
     Ok((attached, auth_result.remembered))
 }
@@ -472,6 +508,9 @@ async fn remote_attach_with_session_token(
         connections,
         e2e_key,
         e2e_encrypted: session_data.e2e_encrypted,
+        is_read_only: session_data.is_read_only,
+        session_rows: session_data.session_rows,
+        session_cols: session_data.session_cols,
     })
 }
 

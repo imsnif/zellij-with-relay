@@ -37,6 +37,7 @@ uuid = { workspace = true }
 zellij-utils = { workspace = true }
 zellij-relay-protocol = { workspace = true, optional = true }
 zellij-web-client-assets = { workspace = true, optional = true }
+zellij-ansi-clip = { workspace = true, default-features = false, features = ["std"], optional = true }
 sha2 = { workspace = true, optional = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
@@ -77,6 +78,10 @@ tokio = { workspace = true, features = ["test-util"] }
 
 [features]
 unstable = []
+# Cascade to `zellij-web-client-assets` so the live `target/` wasm blob is
+# bundled instead of the committed one. Ignored when `web_server_capability`
+# is off (no web-client assets crate is linked in the first place).
+clip_wasm_from_target = ["zellij-web-client-assets?/clip_wasm_from_target"]
 web_server_capability = [
     "dep:futures",
     "dep:axum",
@@ -86,6 +91,7 @@ web_server_capability = [
     "dep:tower-http",
     "dep:zellij-relay-protocol",
     "dep:zellij-web-client-assets",
+    "dep:zellij-ansi-clip",
     "dep:sha2",
     "zellij-utils/web_server_capability",
 ]
