@@ -1,6 +1,9 @@
 //! Emit strategy: walk the grid, write CUP at the start of each row, emit SGR
 //! only when attributes change, emit characters, pad or clip according to viewer
-//! dimensions, restore cursor + visibility at the end.
+//! dimensions, replay any pending passthrough sequences, then close the frame
+//! with the final cursor position + visibility so those sequences are the last
+//! thing the viewer's terminal sees (any cursor-moving junk inside the
+//! passthrough tail cannot override the sharer's cursor).
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -8,7 +11,7 @@ use alloc::vec::Vec;
 use crate::grid::{Color, SgrAttrs, UnderlineStyle, WideFlag};
 use crate::ClipState;
 
-pub(crate) fn emit(state: &ClipState, viewer_rows: u16, viewer_cols: u16) -> Vec<u8> {
+pub(crate) fn emit(state: &mut ClipState, viewer_rows: u16, viewer_cols: u16) -> Vec<u8> {
     let mut out = Vec::with_capacity(1024);
     out.extend_from_slice(b"\x1b[2J");
     // Force a leading SGR reset so the first diff is meaningful.
@@ -70,23 +73,35 @@ pub(crate) fn emit(state: &ClipState, viewer_rows: u16, viewer_cols: u16) -> Vec
         }
     }
 
-    // Restore cursor. Clamp the session cursor into the viewer rect.
+    // Replay any unknown sequences (OSC, DCS, unknown CSI, short ESC,
+    // non-25 private-mode toggles) once. The tail is drained after each
+    // emit so it cannot accumulate across frames — every apply_chunk
+    // collects fresh sequences that are flushed on the next emit.
+    if !state.passthrough_tail.is_empty() {
+        out.extend_from_slice(&state.passthrough_tail);
+        state.passthrough_tail.clear();
+    }
+
+    // Close the frame with cursor position + visibility. These must be
+    // the last thing the viewer's terminal sees so any cursor-moving
+    // junk inside the passthrough tail (unknown CSI `A`/`B`/`u`, rogue
+    // OSC responses, …) cannot override the sharer's cursor. Clamp the
+    // session cursor into the viewer rect before emitting the CUP.
+    let cursor_was_clipped =
+        state.cursor.row >= viewer_rows || state.cursor.col >= viewer_cols;
     let cur_row = core::cmp::min(state.cursor.row, viewer_rows.saturating_sub(1));
     let cur_col = core::cmp::min(state.cursor.col, viewer_cols.saturating_sub(1));
     write_cup(&mut out, cur_row + 1, cur_col + 1);
 
-    if state.cursor_visible {
-        out.extend_from_slice(b"\x1b[?25h");
-    } else {
+    // If the sharer's cursor falls outside the viewer's rect, hide it
+    // unconditionally — matches the server-side clamp in
+    // `zellij-server/src/output/mod.rs::serialize_with_size` and avoids
+    // pinning a phantom cursor to an arbitrary edge of the viewer's
+    // screen.
+    if cursor_was_clipped || !state.cursor_visible {
         out.extend_from_slice(b"\x1b[?25l");
-    }
-
-    // Any sequences we didn't otherwise interpret get replayed at the end as a
-    // safety valve. The order doesn't matter for most private-mode / OSC
-    // controls, and it means future serializer additions keep flowing through
-    // without requiring a clip.wasm rebuild.
-    if !state.passthrough_tail.is_empty() {
-        out.extend_from_slice(&state.passthrough_tail);
+    } else {
+        out.extend_from_slice(b"\x1b[?25h");
     }
 
     out

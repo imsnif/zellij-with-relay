@@ -5508,6 +5508,7 @@ dependencies = [
  "urlencoding",
  "uuid",
  "windows-sys 0.52.0",
+ "zellij-ansi-clip",
  "zellij-relay-protocol",
  "zellij-utils",
  "zellij-web-client-assets",

@@ -57,7 +57,7 @@ impl ClipState {
         parser::apply(self, ansi);
     }
 
-    pub fn emit(&self, viewer_rows: u16, viewer_cols: u16) -> Vec<u8> {
+    pub fn emit(&mut self, viewer_rows: u16, viewer_cols: u16) -> Vec<u8> {
         emit::emit(self, viewer_rows, viewer_cols)
     }
 
@@ -69,6 +69,24 @@ impl ClipState {
         if self.cursor.col >= cols {
             self.cursor.col = cols.saturating_sub(1);
         }
+    }
+
+    /// Diagnostic accessor — returns the currently tracked cursor
+    /// position `(row, col)` in 0-based coordinates.
+    pub fn cursor_position(&self) -> (u16, u16) {
+        (self.cursor.row, self.cursor.col)
+    }
+
+    /// Diagnostic accessor — whether the cursor is currently marked
+    /// visible (true) or hidden (false).
+    pub fn cursor_is_visible(&self) -> bool {
+        self.cursor_visible
+    }
+
+    /// Diagnostic accessor — the currently tracked session grid size
+    /// `(rows, cols)`.
+    pub fn session_size(&self) -> (u16, u16) {
+        (self.grid.rows, self.grid.cols)
     }
 
     #[cfg(test)]

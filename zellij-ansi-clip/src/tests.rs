@@ -13,7 +13,7 @@ fn cells_equivalent(a: &Cell, b: &Cell) -> bool {
     a.ch == b.ch && a.wide == b.wide && a.sgr == b.sgr
 }
 
-fn roundtrip(state: &ClipState, rows: u16, cols: u16) -> ClipState {
+fn roundtrip(state: &mut ClipState, rows: u16, cols: u16) -> ClipState {
     let emitted = state.emit(rows, cols);
     let mut replay = ClipState::new(rows, cols);
     replay.apply_chunk(&emitted);
@@ -57,7 +57,7 @@ fn t02_text_at_origin_viewer_equals_session() {
     assert_eq!(state.grid.at(0, 0).ch, 'H');
     assert_eq!(state.grid.at(0, 4).ch, 'o');
 
-    let replay = roundtrip(&state, 3, 10);
+    let replay = roundtrip(&mut state, 3, 10);
     for c in 0..5 {
         assert!(cells_equivalent(&state.grid.at(0, c), &replay.grid.at(0, c)));
     }
@@ -376,6 +376,142 @@ fn t18_unknown_csi_passthrough() {
     state.apply_chunk(b"\x1b[?1049h");
     let emitted = state.emit(2, 4);
     assert!(find_subslice(&emitted, b"\x1b[?1049h").is_some());
+}
+
+#[test]
+fn t21_cursor_hidden_when_clipped() {
+    // Sharer's cursor is past the viewer's right edge → the clipper
+    // clamps the CUP but must also hide the cursor; otherwise a
+    // phantom cursor pins to the viewer's right edge.
+    let mut state = ClipState::new(5, 20);
+    state.apply_chunk(b"\x1b[3;15Hhello"); // cursor ends at (2, 19) zero-based
+    assert!(state.cursor_is_visible());
+    let emitted = state.emit(5, 10); // viewer narrower than session
+    assert!(
+        find_subslice(&emitted, b"\x1b[?25l").is_some(),
+        "clipped cursor must be hidden"
+    );
+    assert!(
+        find_subslice(&emitted, b"\x1b[?25h").is_none(),
+        "visible-cursor directive must not appear when cursor was clipped"
+    );
+
+    // Viewer large enough to contain the cursor → visibility respected.
+    let emitted2 = state.emit(5, 20);
+    assert!(
+        find_subslice(&emitted2, b"\x1b[?25h").is_some(),
+        "un-clipped cursor should follow `state.cursor_visible` (currently true)"
+    );
+
+    // Explicit hide by the sharer still wins over an un-clipped position.
+    state.apply_chunk(b"\x1b[?25l");
+    let emitted3 = state.emit(5, 20);
+    assert!(
+        find_subslice(&emitted3, b"\x1b[?25l").is_some(),
+        "explicitly hidden cursor must stay hidden"
+    );
+    assert!(
+        find_subslice(&emitted3, b"\x1b[?25h").is_none(),
+        "visible directive must not appear when the sharer hid the cursor"
+    );
+}
+
+#[test]
+fn t19_passthrough_drained_on_emit() {
+    // Unknown sequences must be delivered once per apply_chunk and then
+    // cleared. If the tail accumulated across frames (as it did before
+    // the emit drain fix), long-running sessions would produce emits
+    // growing without bound — visually the r/o viewer sees flicker /
+    // cursor drift during rapid resize because the terminal cannot
+    // process the tail in the window between frames.
+    let mut state = ClipState::new(2, 4);
+    state.apply_chunk(b"\x1b[?1049h");
+    let first = state.emit(2, 4);
+    assert!(find_subslice(&first, b"\x1b[?1049h").is_some());
+    // Second emit without a matching apply_chunk must not replay the tail.
+    let second = state.emit(2, 4);
+    assert!(find_subslice(&second, b"\x1b[?1049h").is_none());
+    // A third apply repopulates the tail; the next emit flushes once more.
+    state.apply_chunk(b"\x1b]8;;http://x\x1b\\");
+    let third = state.emit(2, 4);
+    assert!(find_subslice(&third, b"\x1b]8;;http://x\x1b\\").is_some());
+    let fourth = state.emit(2, 4);
+    assert!(find_subslice(&fourth, b"\x1b]8;;http://x\x1b\\").is_none());
+}
+
+#[test]
+fn t20_closing_cup_after_passthrough() {
+    // The closing CUP + cursor-visibility pair must be the last thing
+    // in the emit, after the passthrough tail. Otherwise, a cursor-moving
+    // sequence that landed in the tail (OSC response, rogue `\x1b[u`,
+    // `\x1b[A`/`B`) would override the sharer's cursor position.
+    let mut state = ClipState::new(5, 10);
+    state.apply_chunk(b"\x1b[3;5HX");
+    state.apply_chunk(b"\x1b[?1049h"); // unknown private mode → passthrough
+    let emitted = state.emit(5, 10);
+
+    let passthrough_pos = find_subslice(&emitted, b"\x1b[?1049h")
+        .expect("passthrough tail should appear in emit");
+    // Apply chunk was `\x1b[3;5HX` — CUP lands at row=2,col=4 zero-based,
+    // then `X` advances the cursor by one column, so `state.cursor` is
+    // `(2, 5)` and the closing CUP is `\x1b[3;6H`.
+    let closing_cup = b"\x1b[3;6H";
+    // Find the LAST occurrence of the closing CUP in the emit.
+    let last_cup_pos = emitted
+        .windows(closing_cup.len())
+        .enumerate()
+        .rev()
+        .find(|(_, w)| *w == closing_cup)
+        .map(|(i, _)| i)
+        .expect("closing CUP to (3,6) should appear in emit");
+    assert!(
+        last_cup_pos > passthrough_pos,
+        "closing CUP at byte {} must come after passthrough tail at byte {}",
+        last_cup_pos,
+        passthrough_pos,
+    );
+    // The visibility directive must immediately follow the closing CUP and
+    // be the final CSI in the emit — no CUP / HVP beyond it.
+    let tail = &emitted[last_cup_pos..];
+    assert!(
+        find_subslice(tail, b"\x1b[?25h").is_some()
+            || find_subslice(tail, b"\x1b[?25l").is_some(),
+        "cursor visibility directive expected after closing CUP"
+    );
+    // Scan the region AFTER the closing CUP + `?25h`/`?25l` for any
+    // further CUP (`H`) or HVP (`f`) finals — there must be none.
+    let post = last_cup_pos + closing_cup.len() + b"\x1b[?25h".len();
+    if post < emitted.len() {
+        let rest = &emitted[post..];
+        let mut i = 0;
+        while i + 1 < rest.len() {
+            if rest[i] == 0x1b && rest[i + 1] == b'[' {
+                // Find final byte of this CSI.
+                let mut j = i + 2;
+                while j < rest.len() {
+                    let b = rest[j];
+                    if (0x40..=0x7e).contains(&b) {
+                        assert!(
+                            b != b'H' && b != b'f',
+                            "CSI CUP/HVP (final={:?}) found at byte {} — cursor \
+                             positioning must not be emitted after the closing \
+                             visibility directive",
+                            b as char,
+                            post + i,
+                        );
+                        i = j + 1;
+                        break;
+                    }
+                    j += 1;
+                }
+                if j >= rest.len() {
+                    break;
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
 }
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
