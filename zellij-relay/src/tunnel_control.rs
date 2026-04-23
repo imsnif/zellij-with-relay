@@ -13,6 +13,7 @@
 //!     * Any post-handshake `Auth` / `Established` is logged and dropped.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -27,6 +28,8 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, Notify};
 use uuid::Uuid;
 use zellij_relay_protocol::{decode_control_frame, ControlMessage};
+
+use crate::heartbeat::{now_millis, spawn_server_heartbeat, HEARTBEAT_TIMEOUT_SECS};
 
 use crate::registry::{AuthResponseResult, TunnelEntry};
 use crate::router::AppState;
@@ -60,12 +63,13 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         },
     };
 
-    let (session_name, zellij_version) = match msg {
+    let (session_name, zellij_version, requested_slug) = match msg {
         ControlMessage::Auth {
             session_name,
             zellij_version,
+            requested_slug,
             ..
-        } => (session_name, zellij_version),
+        } => (session_name, zellij_version, requested_slug),
         other => {
             tracing::warn!(?other, "control tunnel first message was not Auth");
             let _ = send_error(&mut socket, "first frame must be TunnelAuth").await;
@@ -73,7 +77,22 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         },
     };
 
-    let slug = slug::generate();
+    // Phase 6 reconnect: honour the client's `requested_slug` if it was
+    // supplied and is still free. Occupied slugs fall back to a fresh
+    // random slug so a stale reconnect attempt never hijacks a live
+    // tunnel. Empty string means fresh tunnel → always generate.
+    let slug = if !requested_slug.is_empty() && state.registry.get(&requested_slug).is_none() {
+        tracing::info!(%requested_slug, "reusing client-requested slug on reconnect");
+        requested_slug
+    } else {
+        if !requested_slug.is_empty() {
+            tracing::info!(
+                %requested_slug,
+                "requested slug unavailable on reconnect — allocating fresh"
+            );
+        }
+        slug::generate()
+    };
     let tunnel_id = Uuid::new_v4();
     let public_url = state.render_public_url(&slug);
 
@@ -110,28 +129,71 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         return;
     }
 
-    // Split the control socket: writer task drains control_rx, reader task
-    // dispatches incoming frames.
+    // Split the control socket: writer task drains control_rx plus a
+    // dedicated heartbeat-ping channel, reader task dispatches incoming
+    // frames.
     let (mut sink, mut stream) = socket.split();
+
+    let (hb_ping_tx, mut hb_ping_rx) = mpsc::unbounded_channel::<Message>();
+    let pong_tx = hb_ping_tx.clone();
+    let last_activity = Arc::new(AtomicU64::new(now_millis()));
 
     let writer_entry_slug = slug.clone();
     let writer_handle = tokio::spawn(async move {
-        while let Some(bytes) = control_rx.recv().await {
-            if let Err(e) = sink.send(Message::Binary(bytes.into())).await {
-                tracing::debug!(slug = %writer_entry_slug, error = %e, "control writer error");
-                break;
+        loop {
+            tokio::select! {
+                bytes = control_rx.recv() => match bytes {
+                    Some(b) => {
+                        if let Err(e) = sink.send(Message::Binary(b.into())).await {
+                            tracing::debug!(slug = %writer_entry_slug, error = %e, "control writer error");
+                            break;
+                        }
+                    }
+                    None => break,
+                },
+                ping = hb_ping_rx.recv() => match ping {
+                    Some(msg) => {
+                        if let Err(e) = sink.send(msg).await {
+                            tracing::debug!(slug = %writer_entry_slug, error = %e, "control writer ping error");
+                            break;
+                        }
+                    }
+                    None => break,
+                },
             }
         }
         let _ = sink.send(Message::Close(None)).await;
     });
 
+    let (hb_handle, mut hb_tripped) =
+        spawn_server_heartbeat(hb_ping_tx, last_activity.clone(), "control");
+
     // Reader task: dispatch incoming ControlMessages.
     let reader_entry = entry.clone();
-    while let Some(frame) = stream.next().await {
+    'reader: loop {
+        let frame = tokio::select! {
+            frame = stream.next() => frame,
+            _ = &mut hb_tripped => {
+                tracing::warn!(
+                    slug = %reader_entry.slug,
+                    "control tunnel silent >{}s — closing",
+                    HEARTBEAT_TIMEOUT_SECS
+                );
+                break 'reader;
+            }
+        };
+        let Some(frame) = frame else { break 'reader };
+        last_activity.store(now_millis(), Ordering::Relaxed);
         let bytes = match frame {
             Ok(Message::Binary(b)) => b,
             Ok(Message::Text(t)) => t.as_bytes().to_vec().into(),
             Ok(Message::Close(_)) => break,
+            Ok(Message::Ping(p)) => {
+                // Axum does not auto-reply; mirror the ping back as a
+                // pong so the peer's watchdog stays happy.
+                let _ = pong_tx.send(Message::Pong(p));
+                continue;
+            },
             Ok(_) => continue,
             Err(e) => {
                 tracing::debug!(slug = %reader_entry.slug, error = %e, "control reader error");
@@ -306,6 +368,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         }
     }
     writer_handle.abort();
+    hb_handle.abort();
     tracing::info!(slug = %reader_entry.slug, "tunnel closed");
 }
 

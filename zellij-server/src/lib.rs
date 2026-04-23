@@ -1985,9 +1985,72 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                                     let _ = to_server.send(
                                         ServerInstruction::RelayTunnelReady {
                                             client_id,
-                                            public_url,
+                                            public_url: public_url.clone(),
                                         },
                                     );
+
+                                    // Phase 6 (Session A): if the tunnel
+                                    // came up, poll for status changes so
+                                    // reconnect/failed transitions reach
+                                    // the share plugin via
+                                    // RemoteShareUrlChange. The poll
+                                    // exits when the status reverts to
+                                    // empty string (tunnel stopped) or
+                                    // to a terminal Failed sentinel.
+                                    if public_url.is_some() {
+                                        let path_poll = path_str.clone();
+                                        let to_server_poll = to_server.clone();
+                                        thread::spawn(move || {
+                                            let mut last: Option<String> = public_url;
+                                            loop {
+                                                std::thread::sleep(
+                                                    std::time::Duration::from_secs(2),
+                                                );
+                                                let status_result = query_webserver_with_response(
+                                                    &path_poll,
+                                                    WebServerInstruction::GetRelayTunnelStatus {
+                                                        client_id,
+                                                    },
+                                                    5_000,
+                                                );
+                                                let status_url = match status_result {
+                                                    Ok(
+                                                        WebServerResponse::RelayTunnelStatusReport {
+                                                            status_url,
+                                                            ..
+                                                        },
+                                                    ) => status_url,
+                                                    Ok(_) => String::new(),
+                                                    Err(_) => String::new(),
+                                                };
+                                                let next: Option<String> = if status_url.is_empty()
+                                                {
+                                                    None
+                                                } else {
+                                                    Some(status_url)
+                                                };
+                                                if next != last {
+                                                    let _ = to_server_poll.send(
+                                                        ServerInstruction::RelayTunnelReady {
+                                                            client_id,
+                                                            public_url: next.clone(),
+                                                        },
+                                                    );
+                                                    last = next.clone();
+                                                }
+                                                // Exit on tunnel gone or
+                                                // terminal Failed.
+                                                if last.is_none() {
+                                                    break;
+                                                }
+                                                if let Some(v) = &last {
+                                                    if v.starts_with("__RELAY_FAILED__:") {
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    }
                                 });
                             },
                         }

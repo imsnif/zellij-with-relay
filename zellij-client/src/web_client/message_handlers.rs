@@ -151,6 +151,7 @@ pub fn render_to_client(
     cancellation_token: CancellationToken,
     should_not_reconnect: Arc<AtomicBool>,
     e2e_key: Option<[u8; 32]>,
+    mut ping_channel_rx: UnboundedReceiver<Message>,
 ) {
     tokio::spawn(async move {
         loop {
@@ -175,6 +176,37 @@ pub fn render_to_client(
                         break;
                     }
                     break;
+                }
+                // Phase 6 (Session A): heartbeat Ping / Pong frames
+                // routed through this dedicated channel so the existing
+                // stdout pipeline can stay `String`-typed.
+                ping = ping_channel_rx.recv() => {
+                    match ping {
+                        Some(msg) => {
+                            match &msg {
+                                Message::Ping(p) => log::info!(
+                                    "[hb-local-terminal] forwarding PING to socket sink ({} bytes)",
+                                    p.len()
+                                ),
+                                Message::Pong(p) => log::info!(
+                                    "[hb-local-terminal] forwarding PONG to socket sink ({} bytes)",
+                                    p.len()
+                                ),
+                                _ => {},
+                            }
+                            if let Err(e) = client_channel_tx.send(msg).await {
+                                log::warn!(
+                                    "[hb-local-terminal] socket sink send error ({:?}) — exiting render_to_client",
+                                    e
+                                );
+                                break;
+                            }
+                        }
+                        None => {
+                            log::info!("[hb-local-terminal] ping channel closed — exiting render_to_client");
+                            break;
+                        },
+                    }
                 }
                 result = stdout_channel_rx.recv() => {
                     match result {
@@ -210,10 +242,29 @@ pub fn send_control_messages_to_client(
 ) {
     tokio::spawn(async move {
         while let Some(message) = control_channel_rx.recv().await {
-            if socket_channel_tx.send(message).await.is_err() {
+            // Phase 6 diagnostic log: prove the Ping actually reaches
+            // the socket writer.
+            if let Message::Ping(ref p) = message {
+                log::info!(
+                    "[hb-local-control] forwarding PING to socket sink ({} bytes)",
+                    p.len()
+                );
+            }
+            if let Message::Pong(ref p) = message {
+                log::info!(
+                    "[hb-local-control] forwarding PONG to socket sink ({} bytes)",
+                    p.len()
+                );
+            }
+            if let Err(e) = socket_channel_tx.send(message).await {
+                log::warn!(
+                    "[hb-local-control] socket sink send error ({:?}) — exiting forwarder",
+                    e
+                );
                 break;
             }
         }
+        log::info!("[hb-local-control] forwarder exited (channel closed)");
     });
 }
 

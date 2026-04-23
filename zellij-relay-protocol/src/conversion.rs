@@ -17,6 +17,10 @@ pub enum ControlMessage {
         session_name: String,
         protocol_version: u32,
         zellij_version: String,
+        /// Phase 6 reconnect support: empty string on a fresh handshake,
+        /// the previously-issued slug when reconnecting. The relay
+        /// honours it if still free, falls back to a fresh slug otherwise.
+        requested_slug: String,
     },
     Established {
         public_url: String,
@@ -110,11 +114,13 @@ impl From<ControlMessage> for proto::ControlFrame {
                 session_name,
                 protocol_version,
                 zellij_version,
+                requested_slug,
             } => Payload::Auth(proto::TunnelAuth {
                 token,
                 session_name,
                 protocol_version,
                 zellij_version,
+                requested_slug,
             }),
             ControlMessage::Established {
                 public_url,
@@ -192,6 +198,7 @@ impl TryFrom<proto::ControlFrame> for ControlMessage {
                 session_name: a.session_name,
                 protocol_version: a.protocol_version,
                 zellij_version: a.zellij_version,
+                requested_slug: a.requested_slug,
             }),
             Some(Payload::Established(e)) => Ok(ControlMessage::Established {
                 public_url: e.public_url,

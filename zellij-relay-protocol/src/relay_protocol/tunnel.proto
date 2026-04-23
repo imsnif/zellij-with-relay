@@ -8,6 +8,12 @@ message TunnelAuth {
   string session_name = 2;
   uint32 protocol_version = 3;
   string zellij_version = 4;
+  // Phase 6 reconnect support: when reconnecting after an unexpected
+  // drop, the client supplies the previously-issued slug so the relay
+  // can reuse it if still free. Empty string on a fresh handshake. The
+  // relay falls back to a freshly-generated slug if the requested one
+  // is already occupied.
+  string requested_slug = 5;
 }
 
 // Relay response to a successful TunnelAuth.

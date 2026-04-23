@@ -11,6 +11,8 @@
 //!   matching viewer's terminal sink as `Message::Binary`.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use axum::{
     extract::{
@@ -23,6 +25,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 use zellij_relay_protocol::{decode_terminal_frame, TerminalMessage};
 
+use crate::heartbeat::{now_millis, spawn_server_heartbeat, HEARTBEAT_TIMEOUT_SECS};
 use crate::router::AppState;
 
 pub async fn handler(
@@ -91,24 +94,65 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, slug: String) {
 
     let (mut sink, mut stream) = socket.split();
 
-    // Writer task: drain encoded TerminalMessage bytes onto the sink.
+    let (hb_ping_tx, mut hb_ping_rx) = mpsc::unbounded_channel::<Message>();
+    let pong_tx = hb_ping_tx.clone();
+    let last_activity = Arc::new(AtomicU64::new(now_millis()));
+
+    // Writer task: drain encoded TerminalMessage bytes + heartbeat pings
+    // onto the sink.
     let writer_slug = entry.slug.clone();
     let writer_handle = tokio::spawn(async move {
-        while let Some(bytes) = terminal_rx.recv().await {
-            if let Err(e) = sink.send(Message::Binary(bytes.into())).await {
-                tracing::debug!(slug = %writer_slug, error = %e, "terminal writer error");
-                break;
+        loop {
+            tokio::select! {
+                bytes = terminal_rx.recv() => match bytes {
+                    Some(b) => {
+                        if let Err(e) = sink.send(Message::Binary(b.into())).await {
+                            tracing::debug!(slug = %writer_slug, error = %e, "terminal writer error");
+                            break;
+                        }
+                    }
+                    None => break,
+                },
+                ping = hb_ping_rx.recv() => match ping {
+                    Some(msg) => {
+                        if let Err(e) = sink.send(msg).await {
+                            tracing::debug!(slug = %writer_slug, error = %e, "terminal writer ping error");
+                            break;
+                        }
+                    }
+                    None => break,
+                },
             }
         }
         let _ = sink.send(Message::Close(None)).await;
     });
 
+    let (hb_handle, mut hb_tripped) =
+        spawn_server_heartbeat(hb_ping_tx, last_activity.clone(), "terminal");
+
     // Reader task body runs inline.
-    while let Some(frame) = stream.next().await {
+    'reader: loop {
+        let frame = tokio::select! {
+            frame = stream.next() => frame,
+            _ = &mut hb_tripped => {
+                tracing::warn!(
+                    slug = %entry.slug,
+                    "terminal tunnel silent >{}s — closing",
+                    HEARTBEAT_TIMEOUT_SECS
+                );
+                break 'reader;
+            }
+        };
+        let Some(frame) = frame else { break 'reader };
+        last_activity.store(now_millis(), Ordering::Relaxed);
         let bytes = match frame {
             Ok(Message::Binary(b)) => b,
             Ok(Message::Text(t)) => t.as_bytes().to_vec().into(),
             Ok(Message::Close(_)) => break,
+            Ok(Message::Ping(p)) => {
+                let _ = pong_tx.send(Message::Pong(p));
+                continue;
+            },
             Ok(_) => continue,
             Err(e) => {
                 tracing::debug!(slug = %entry.slug, error = %e, "terminal reader error");
@@ -171,6 +215,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, slug: String) {
     // Clear the terminal_tx so writers can't enqueue to a closed channel.
     *entry.terminal_tx.lock().unwrap() = None;
     writer_handle.abort();
+    hb_handle.abort();
     tracing::info!(slug = %entry.slug, "terminal tunnel closed");
 }
 

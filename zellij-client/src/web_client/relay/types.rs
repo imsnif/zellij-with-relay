@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 
@@ -12,6 +12,50 @@ use zellij_utils::{
 
 use crate::web_client::types::{ClientOsApiFactory, ConnectionTable, SessionManager};
 
+/// Phase 6 structured status surfaced to the sharer through the share
+/// plugin. Encoded into `ModeInfo.remote_share_url: Option<String>` via
+/// sentinel strings (see `RelayTunnelStatus::to_mode_info_sentinel`) so
+/// no protobuf churn is required to reach the plugin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelayTunnelStatus {
+    /// Tunnel is live; the carried URL matches what the relay handed back.
+    Connected(String),
+    /// Last known URL was `url`, reconnect is in progress; `attempt`
+    /// counts consecutive reconnect cycles (1-based).
+    Reconnecting {
+        last_known_url: Option<String>,
+        attempt: u32,
+    },
+    /// Reconnect budget exhausted or non-retryable error; plugin surface
+    /// renders the carried diagnostic verbatim.
+    Failed(String),
+}
+
+impl RelayTunnelStatus {
+    /// Sentinel prefix identifying a `Reconnecting` status in the wire
+    /// `Option<String>`. Chosen to be unambiguously distinct from any
+    /// valid URL (no `://`, leading underscores).
+    pub const RECONNECTING_SENTINEL: &'static str = "__RELAY_RECONNECTING__:";
+    /// Sentinel prefix for `Failed` status.
+    pub const FAILED_SENTINEL: &'static str = "__RELAY_FAILED__:";
+
+    /// Encode to the string form shipped through `ModeInfo.remote_share_url`.
+    /// `None` means "no tunnel active" — caller fast-paths to `None` there.
+    pub fn to_mode_info_sentinel(&self) -> Option<String> {
+        match self {
+            RelayTunnelStatus::Connected(url) => Some(url.clone()),
+            RelayTunnelStatus::Reconnecting { attempt, .. } => Some(format!(
+                "{}{}",
+                Self::RECONNECTING_SENTINEL,
+                attempt
+            )),
+            RelayTunnelStatus::Failed(msg) => {
+                Some(format!("{}{}", Self::FAILED_SENTINEL, msg))
+            },
+        }
+    }
+}
+
 /// Handle to a running relay tunnel. Holds the shutdown signal whose firing
 /// causes the multiplexer tasks to exit and the sockets to close.
 pub struct RelayTunnelHandle {
@@ -21,7 +65,22 @@ pub struct RelayTunnelHandle {
     pub slug: String,
     #[allow(dead_code)]
     pub tunnel_id: String,
-    pub shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    /// Fires the initial multiplexer shutdown. Only consumed once by
+    /// `run_supervisor`; reconnect iterations rely on `stop_requested`
+    /// + a per-iteration oneshot instead.
+    pub shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
+    /// Cooperative stop flag checked by the supervisor around every
+    /// reconnect boundary. `stop_relay_tunnel` flips it to `true`.
+    pub stop_requested: Arc<AtomicBool>,
+    /// Per-iteration shutdown signaller: the supervisor stores the
+    /// current `oneshot::Sender<()>` here each time it kicks off a new
+    /// `run_multiplexer`. `stop_relay_tunnel` drains it to forcibly
+    /// break a live reconnected run.
+    pub current_iteration_shutdown: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    /// Phase 6: latest known status for this tunnel, shared with the
+    /// supervisor task. The server-side poll reads this and translates
+    /// transitions into `RemoteShareUrlChange` screen instructions.
+    pub status: Arc<Mutex<RelayTunnelStatus>>,
 }
 
 #[derive(Default)]
@@ -40,6 +99,18 @@ impl RelayTunnelRegistry {
 
     pub async fn remove(&self, client_id: ClientId) -> Option<RelayTunnelHandle> {
         self.inner.lock().await.remove(&client_id)
+    }
+
+    /// Phase 6: read-only access to a still-registered tunnel handle.
+    /// Returns `None` if no tunnel exists for `client_id`. Kept narrow
+    /// on purpose — callers that want to *remove* should use `remove`.
+    pub async fn with_handle<R>(
+        &self,
+        client_id: ClientId,
+        f: impl FnOnce(&RelayTunnelHandle) -> R,
+    ) -> Option<R> {
+        let guard = self.inner.lock().await;
+        guard.get(&client_id).map(f)
     }
 }
 

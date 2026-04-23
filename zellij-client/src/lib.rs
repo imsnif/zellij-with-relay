@@ -523,6 +523,26 @@ pub async fn run_remote_client_terminal_loop(
     // locked and never flips for them.
     let mut stdin_unlocked = e2e_key.is_none() && !is_read_only;
 
+    // Phase 6 (Session A): heartbeat on both WS legs. `heartbeat_ticker`
+    // fires every 15s; a full ping cadence is every 30s (two ticks) and
+    // the watchdog trips when either leg has been silent > 60s.
+    const ATTACH_HEARTBEAT_INTERVAL_SECS: u64 = 30;
+    const ATTACH_HEARTBEAT_TIMEOUT_SECS: u64 = 60;
+    let mut heartbeat_ticker = tokio::time::interval(std::time::Duration::from_secs(
+        ATTACH_HEARTBEAT_INTERVAL_SECS / 2,
+    ));
+    heartbeat_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    heartbeat_ticker.tick().await; // burn first immediate tick
+    let mut heartbeat_tick_count: u32 = 0;
+    let now_ms = || -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    };
+    let mut last_terminal_activity_ms = now_ms();
+    let mut last_control_activity_ms = now_ms();
+
     loop {
         tokio::select! {
             // Handle stdin input (gated under E2E until first clean decrypt;
@@ -609,8 +629,56 @@ pub async fn run_remote_client_terminal_loop(
                 }
             }
 
+            // Phase 6 (Session A): heartbeat tick. On every full cadence
+            // emit a Ping on both sockets; on every half-cadence check
+            // the silence budget. Tungstenite auto-replies to Pings
+            // from the remote peer, so inbound Pong frames show up in
+            // the terminal/control arms below and refresh the activity
+            // timestamps.
+            _ = heartbeat_ticker.tick() => {
+                heartbeat_tick_count += 1;
+                if u64::from(heartbeat_tick_count) * (ATTACH_HEARTBEAT_INTERVAL_SECS / 2)
+                    >= ATTACH_HEARTBEAT_INTERVAL_SECS
+                {
+                    heartbeat_tick_count = 0;
+                    let payload = b"hb".to_vec();
+                    if connections
+                        .terminal_ws
+                        .send(Message::Ping(payload.clone()))
+                        .await
+                        .is_err()
+                    {
+                        log::warn!("attach heartbeat: terminal ws send failed");
+                        break;
+                    }
+                    if connections
+                        .control_ws
+                        .send(Message::Ping(payload))
+                        .await
+                        .is_err()
+                    {
+                        log::warn!("attach heartbeat: control ws send failed");
+                        break;
+                    }
+                }
+                let now = now_ms();
+                if now.saturating_sub(last_terminal_activity_ms)
+                    > ATTACH_HEARTBEAT_TIMEOUT_SECS * 1000
+                    || now.saturating_sub(last_control_activity_ms)
+                        > ATTACH_HEARTBEAT_TIMEOUT_SECS * 1000
+                {
+                    log::warn!(
+                        "attach heartbeat: watchdog tripped (terminal silent {}ms, control silent {}ms)",
+                        now.saturating_sub(last_terminal_activity_ms),
+                        now.saturating_sub(last_control_activity_ms)
+                    );
+                    break;
+                }
+            }
+
             // Handle terminal messages
             terminal_msg = connections.terminal_ws.next() => {
+                last_terminal_activity_ms = now_ms();
                 match terminal_msg {
                     Some(Ok(Message::Text(text))) => {
                         if e2e_key.is_some() {
@@ -698,6 +766,7 @@ pub async fn run_remote_client_terminal_loop(
             }
 
             control_msg = connections.control_ws.next() => {
+                last_control_activity_ms = now_ms();
                 match control_msg {
                     Some(Ok(Message::Text(msg))) => {
                         let deserialized_msg: Result<WebServerToWebClientControlMessage, _> =

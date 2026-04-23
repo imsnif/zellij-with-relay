@@ -4,6 +4,7 @@ pub(crate) mod authentication;
 mod connection_manager;
 mod http_handlers;
 mod ipc_listener;
+mod local_heartbeat;
 mod message_handlers;
 mod relay;
 mod server_listener;
