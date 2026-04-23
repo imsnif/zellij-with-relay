@@ -84,6 +84,65 @@ In a Zellij session on your laptop:
 4. Open that URL in any browser. Paste the token. Live session.
 5. Press `I` in the plugin to tear the tunnel down.
 
+> Phase 6 Session C tightens tunnel establishment with a shared-secret
+> auth token; see [Tunnel auth tokens](#tunnel-auth-tokens-phase-6-session-c)
+> below before expecting `i` to open the tunnel cleanly.
+
+## Tunnel auth tokens (Phase 6 Session C)
+
+The relay rejects any `TunnelAuth` whose `token` hash is not in its
+on-disk store, so operators must mint one on the relay host and
+configure the sharer's Zellij to send it.
+
+### Manage tokens on the relay host
+
+Tokens live in `$RELAY_DATA_DIR/relay_tunnel_auth_tokens.db`
+(`/var/lib/zellij-relay/relay_tunnel_auth_tokens.db` by default). The
+`zellij-relay` binary exposes subcommands:
+
+```sh
+# Inside the deployed relay container:
+./deploy.sh exec relay zellij-relay create-token my-laptop
+./deploy.sh exec relay zellij-relay list-tokens
+./deploy.sh exec relay zellij-relay revoke-token my-laptop
+```
+
+`create-token` prints the raw token **once** — store it securely. Only
+the SHA-256 hash is written to disk.
+
+### Configure Zellij to use the token
+
+Either persist in KDL:
+
+```kdl
+options {
+    relay_server_url "wss://<ip-dashes>.sslip.io"
+    relay_tunnel_auth_token "paste-token-here"
+}
+```
+
+…or set via `zellij options`:
+
+```sh
+zellij options --relay-tunnel-auth-token "paste-token-here"
+```
+
+### Inline prompt flow in the share plugin
+
+If Zellij has no token configured (or the relay rejects the configured
+one), pressing `i` surfaces the `<relay rejected auth token>` row.
+Pressing `i` again opens an inline prompt — paste the token, press
+`Enter`, and the tunnel opens in one keystroke flow. `A` rotates the
+token at any time without waiting for a rejection.
+
+### Revocation propagation
+
+Revoking a viewer token via the share plugin's `x` / `Ctrl-X` path
+emits a `RevokeToken` control frame to every active relay tunnel.
+The relay force-disconnects every viewer whose session was keyed on
+that hash and drops the r/o fan-out group so a subsequent viewer with
+the same (now-revoked) raw token fails at the auth step.
+
 ## Operate
 
 All operational commands need `--vps-ip` and `--vps-user` (they drive the

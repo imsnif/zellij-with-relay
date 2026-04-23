@@ -6,8 +6,8 @@ use crate::web_server_contract::web_server_contract::{
     instruction_for_web_server, web_server_response, GetRelayTunnelStatusMsg,
     InstructionForWebServer as ProtoInstructionForWebServer, QueryVersionMsg,
     RelayTunnelErrorMsg, RelayTunnelEstablishedMsg, RelayTunnelStatusReportMsg,
-    RelayTunnelStoppedMsg, ShutdownWebServerMsg, StartRelayTunnelMsg, StopRelayTunnelMsg,
-    VersionResponseMsg, WebServerResponse as ProtoWebServerResponse,
+    RelayTunnelStoppedMsg, RevokeRelayTokenMsg, ShutdownWebServerMsg, StartRelayTunnelMsg,
+    StopRelayTunnelMsg, VersionResponseMsg, WebServerResponse as ProtoWebServerResponse,
 };
 
 // Convert Rust InstructionForWebServer to protobuf
@@ -25,11 +25,13 @@ impl From<RustInstructionForWebServer> for ProtoInstructionForWebServer {
                 session_name,
                 relay_url,
                 zellij_version,
+                relay_tunnel_auth_token,
             } => instruction_for_web_server::Instruction::StartRelayTunnel(StartRelayTunnelMsg {
                 client_id: client_id as u32,
                 session_name,
                 relay_url,
                 zellij_version,
+                relay_tunnel_auth_token,
             }),
             RustInstructionForWebServer::StopRelayTunnel { client_id } => {
                 instruction_for_web_server::Instruction::StopRelayTunnel(StopRelayTunnelMsg {
@@ -42,6 +44,11 @@ impl From<RustInstructionForWebServer> for ProtoInstructionForWebServer {
                         client_id: client_id as u32,
                     },
                 )
+            },
+            RustInstructionForWebServer::RevokeRelayToken { token_hash } => {
+                instruction_for_web_server::Instruction::RevokeRelayToken(RevokeRelayTokenMsg {
+                    token_hash,
+                })
             },
         };
 
@@ -69,6 +76,7 @@ impl TryFrom<ProtoInstructionForWebServer> for RustInstructionForWebServer {
                     session_name: msg.session_name,
                     relay_url: msg.relay_url,
                     zellij_version: msg.zellij_version,
+                    relay_tunnel_auth_token: msg.relay_tunnel_auth_token,
                 })
             },
             Some(instruction_for_web_server::Instruction::StopRelayTunnel(msg)) => {
@@ -79,6 +87,11 @@ impl TryFrom<ProtoInstructionForWebServer> for RustInstructionForWebServer {
             Some(instruction_for_web_server::Instruction::GetRelayTunnelStatus(msg)) => {
                 Ok(RustInstructionForWebServer::GetRelayTunnelStatus {
                     client_id: msg.client_id as u16,
+                })
+            },
+            Some(instruction_for_web_server::Instruction::RevokeRelayToken(msg)) => {
+                Ok(RustInstructionForWebServer::RevokeRelayToken {
+                    token_hash: msg.token_hash,
                 })
             },
             None => Err(anyhow!("Missing instruction in InstructionForWebServer")),
@@ -201,6 +214,7 @@ mod tests {
             session_name: "foo".into(),
             relay_url: "ws://x".into(),
             zellij_version: "0.45.0".into(),
+            relay_tunnel_auth_token: "secret-token".into(),
         };
         let decoded = roundtrip_instruction(original.clone());
         match (original, decoded) {
@@ -210,18 +224,21 @@ mod tests {
                     session_name: a2,
                     relay_url: a3,
                     zellij_version: a4,
+                    relay_tunnel_auth_token: a5,
                 },
                 InstructionForWebServer::StartRelayTunnel {
                     client_id: b1,
                     session_name: b2,
                     relay_url: b3,
                     zellij_version: b4,
+                    relay_tunnel_auth_token: b5,
                 },
             ) => {
                 assert_eq!(a1, b1);
                 assert_eq!(a2, b2);
                 assert_eq!(a3, b3);
                 assert_eq!(a4, b4);
+                assert_eq!(a5, b5);
             },
             (_, other) => panic!("expected StartRelayTunnel, got {:?}", other),
         }
@@ -232,6 +249,7 @@ mod tests {
             session_name: "n".into(),
             relay_url: "r".into(),
             zellij_version: "v".into(),
+            relay_tunnel_auth_token: String::new(),
         }
         .into();
         assert!(matches!(

@@ -51,6 +51,11 @@ pub enum InstructionForWebServer {
         session_name: String,
         relay_url: String,
         zellij_version: String,
+        /// Phase 6 Session C: shared-secret tunnel-auth token. Sent on
+        /// `TunnelAuth.token`; a missing or unknown token is rejected by
+        /// the relay with `TunnelError { message: "relay tunnel auth
+        /// rejected" }`. Empty string is treated as "not configured".
+        relay_tunnel_auth_token: String,
     },
     StopRelayTunnel {
         client_id: ClientId,
@@ -63,6 +68,14 @@ pub enum InstructionForWebServer {
     /// is registered for this `client_id`.
     GetRelayTunnelStatus {
         client_id: ClientId,
+    },
+    /// Phase 6 Session C: broadcast a token revocation to every active
+    /// relay tunnel registered in this web-server process. The relay
+    /// disconnects any viewers whose sessions are keyed on that hash.
+    /// Fire-and-forget; a `WebServerResponse::Version` is sent back
+    /// purely so the IPC socket closes cleanly.
+    RevokeRelayToken {
+        token_hash: String,
     },
 }
 

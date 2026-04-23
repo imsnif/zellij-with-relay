@@ -3532,6 +3532,9 @@ pub enum PluginCommand {
     StopSharingCurrentSession,
     ShareCurrentSessionToRelay,
     StopSharingCurrentSessionFromRelay,
+    /// Phase 6 Session C: persist a relay tunnel-auth token into the sharer's
+    /// runtime config. Empty string clears the configured token.
+    SetRelayTunnelAuthToken(String),
     OpenFileInPlaceOfPlugin(FileToOpen, bool, Context), // bool -> close_plugin_after_replace
     GroupAndUngroupPanes(Vec<PaneId>, Vec<PaneId>, bool), // panes to group, panes to ungroup,
     // bool -> for all clients

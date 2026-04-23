@@ -101,6 +101,16 @@ message SessionSize {
   uint32 cols = 3;
 }
 
+// Zellij → Relay: tear down any state keyed on this token hash. Emitted when
+// a viewer-auth token is revoked locally on the sharer. The relay removes the
+// matching r/o fan-out group (force-disconnecting every viewer in the group)
+// or — for r/w — force-disconnects the single viewer whose session is keyed
+// on that hash. Also purges the token from any validated-hash cache so a
+// subsequent viewer presenting the same token is rejected at the auth layer.
+message RevokeToken {
+  string token_hash = 1;
+}
+
 // Envelope for all control-tunnel messages. All Phase 1 messages that travel
 // on the control tunnel are wrapped in this oneof so that Phase 2+ can add
 // variants (AuthChallenge, ClientConnected, ControlFrame, ...) without
@@ -117,6 +127,7 @@ message ControlFrame {
     ControlFrameData control_frame_data = 8;
     ReadOnlyViewerUpdate read_only_viewer_update = 9;
     SessionSize session_size = 10;
+    RevokeToken revoke_token = 11;
   }
 }
 

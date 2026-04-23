@@ -119,7 +119,8 @@ pub use super::generated_api::api::{
         ScrollToBottomInPaneIdPayload, ScrollToTopInPaneIdPayload, ScrollUpInPaneIdPayload,
         SessionListSnapshot as ProtobufSessionListSnapshot, SetFloatingPanePinnedPayload,
         SetPaneBorderlessPayload, SetPaneColorPayload, SetPaneRegexHighlightsPayload,
-        SetSelfMouseSelectionSupportPayload, SetTimeoutPayload, ShowCursorPayload,
+        SetRelayTunnelAuthTokenPayload, SetSelfMouseSelectionSupportPayload, SetTimeoutPayload,
+        ShowCursorPayload,
         ShowFloatingPanesPayload as ProtobufShowFloatingPanesPayload,
         ShowFloatingPanesResponse as ProtobufShowFloatingPanesResponse, ShowPaneWithIdPayload,
         StackPanesPayload, SubscribePayload, SwitchSessionPayload, SwitchTabToIdPayload,
@@ -2313,6 +2314,12 @@ impl TryFrom<ProtobufPluginCommand> for PluginCommand {
                     Ok(PluginCommand::StopSharingCurrentSessionFromRelay)
                 }
             },
+            Some(CommandName::SetRelayTunnelAuthToken) => match protobuf_plugin_command.payload {
+                Some(Payload::SetRelayTunnelAuthTokenPayload(payload)) => {
+                    Ok(PluginCommand::SetRelayTunnelAuthToken(payload.token))
+                },
+                _ => Err("SetRelayTunnelAuthToken requires a payload"),
+            },
             Some(CommandName::SetSelfMouseSelectionSupport) => {
                 match protobuf_plugin_command.payload {
                     Some(Payload::SetSelfMouseSelectionSupportPayload(
@@ -4046,6 +4053,12 @@ impl TryFrom<PluginCommand> for ProtobufPluginCommand {
             PluginCommand::StopSharingCurrentSessionFromRelay => Ok(ProtobufPluginCommand {
                 name: CommandName::StopSharingCurrentSessionFromRelay as i32,
                 payload: None,
+            }),
+            PluginCommand::SetRelayTunnelAuthToken(token) => Ok(ProtobufPluginCommand {
+                name: CommandName::SetRelayTunnelAuthToken as i32,
+                payload: Some(Payload::SetRelayTunnelAuthTokenPayload(
+                    SetRelayTunnelAuthTokenPayload { token },
+                )),
             }),
             PluginCommand::SetSelfMouseSelectionSupport(support_mouse_selection) => {
                 Ok(ProtobufPluginCommand {

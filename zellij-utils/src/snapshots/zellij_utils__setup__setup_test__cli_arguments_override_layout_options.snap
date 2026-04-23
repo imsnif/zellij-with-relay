@@ -52,6 +52,7 @@ Options {
     enforce_https_for_localhost: None,
     relay_server_url: None,
     encrypt_web_sharing: None,
+    relay_tunnel_auth_token: None,
     post_command_discovery_hook: None,
     client_async_worker_tasks: None,
 }

@@ -103,12 +103,14 @@ pub async fn listen_to_web_server_instructions(
                         session_name,
                         relay_url,
                         zellij_version,
+                        relay_tunnel_auth_token,
                     } => {
                         let response = match crate::web_client::relay::start_relay_tunnel(
                             client_id,
                             relay_url,
                             session_name,
                             zellij_version,
+                            relay_tunnel_auth_token,
                             relay_ctx.connection_table.clone(),
                             relay_ctx.os_api_factory.clone(),
                             relay_ctx.session_manager.clone(),
@@ -150,6 +152,22 @@ pub async fn listen_to_web_server_instructions(
                             client_id,
                             status_url,
                         };
+                        let _ = send_webserver_response(&mut receiver, response).await;
+                    },
+                    InstructionForWebServer::RevokeRelayToken { token_hash } => {
+                        crate::web_client::relay::broadcast_revoke_token(token_hash)
+                            .await;
+                        // Fire-and-forget. Reply with a bogus version
+                        // payload purely so the IPC socket closes with a
+                        // well-formed protobuf — matches the existing
+                        // response-required round-trip pattern.
+                        let response = WebServerResponse::Version(
+                            zellij_utils::web_server_commands::VersionInfo {
+                                version: zellij_utils::consts::VERSION.to_string(),
+                                ip: String::new(),
+                                port: 0,
+                            },
+                        );
                         let _ = send_webserver_response(&mut receiver, response).await;
                     },
                 },

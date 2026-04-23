@@ -1,7 +1,7 @@
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct InstructionForWebServer {
-    #[prost(oneof="instruction_for_web_server::Instruction", tags="1, 2, 3, 4, 5")]
+    #[prost(oneof="instruction_for_web_server::Instruction", tags="1, 2, 3, 4, 5, 6")]
     pub instruction: ::core::option::Option<instruction_for_web_server::Instruction>,
 }
 /// Nested message and enum types in `InstructionForWebServer`.
@@ -19,7 +19,18 @@ pub mod instruction_for_web_server {
         StopRelayTunnel(super::StopRelayTunnelMsg),
         #[prost(message, tag="5")]
         GetRelayTunnelStatus(super::GetRelayTunnelStatusMsg),
+        #[prost(message, tag="6")]
+        RevokeRelayToken(super::RevokeRelayTokenMsg),
     }
+}
+/// Phase 6 Session C: propagate a viewer-token revocation from the Zellij
+/// server process into the web-server process, so it can be forwarded to
+/// every active relay tunnel.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RevokeRelayTokenMsg {
+    #[prost(string, tag="1")]
+    pub token_hash: ::prost::alloc::string::String,
 }
 /// Empty for now, but allows for future parameters like graceful timeout
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -41,6 +52,11 @@ pub struct StartRelayTunnelMsg {
     pub relay_url: ::prost::alloc::string::String,
     #[prost(string, tag="4")]
     pub zellij_version: ::prost::alloc::string::String,
+    /// Phase 6 Session C: shared-secret tunnel-auth token. Empty string
+    /// means "not configured"; the relay rejects with
+    /// `TunnelError { message: "relay tunnel auth rejected" }`.
+    #[prost(string, tag="5")]
+    pub relay_tunnel_auth_token: ::prost::alloc::string::String,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

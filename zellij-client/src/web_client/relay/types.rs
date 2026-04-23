@@ -81,6 +81,12 @@ pub struct RelayTunnelHandle {
     /// supervisor task. The server-side poll reads this and translates
     /// transitions into `RemoteShareUrlChange` screen instructions.
     pub status: Arc<Mutex<RelayTunnelStatus>>,
+    /// Phase 6 Session C: shared handle to the control-tunnel writer of
+    /// the current (first or reconnected) iteration. Refreshed by the
+    /// supervisor on every reconnect. Consumers send encoded
+    /// `ControlMessage` bytes into this to reach the relay — currently
+    /// the `RevokeRelayToken` IPC. `None` between reconnect boundaries.
+    pub control_tx: Arc<Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>>,
 }
 
 #[derive(Default)]
@@ -111,6 +117,16 @@ impl RelayTunnelRegistry {
     ) -> Option<R> {
         let guard = self.inner.lock().await;
         guard.get(&client_id).map(f)
+    }
+
+    /// Phase 6 Session C: run a closure against every registered handle.
+    /// Used by `broadcast_revoke_token` to fan a control-plane frame out
+    /// to every live tunnel.
+    pub async fn for_each_handle<F: FnMut(&RelayTunnelHandle)>(&self, mut f: F) {
+        let guard = self.inner.lock().await;
+        for handle in guard.values() {
+            f(handle);
+        }
     }
 }
 

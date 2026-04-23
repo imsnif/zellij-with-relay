@@ -140,6 +140,18 @@ pub struct SessionSize {
     #[prost(uint32, tag="3")]
     pub cols: u32,
 }
+/// Zellij → Relay: tear down any state keyed on this token hash. Emitted when
+/// a viewer-auth token is revoked locally on the sharer. The relay removes the
+/// matching r/o fan-out group (force-disconnecting every viewer in the group)
+/// or — for r/w — force-disconnects the single viewer whose session is keyed
+/// on that hash. Also purges the token from any validated-hash cache so a
+/// subsequent viewer presenting the same token is rejected at the auth layer.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RevokeToken {
+    #[prost(string, tag="1")]
+    pub token_hash: ::prost::alloc::string::String,
+}
 /// Envelope for all control-tunnel messages. All Phase 1 messages that travel
 /// on the control tunnel are wrapped in this oneof so that Phase 2+ can add
 /// variants (AuthChallenge, ClientConnected, ControlFrame, ...) without
@@ -147,7 +159,7 @@ pub struct SessionSize {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ControlFrame {
-    #[prost(oneof="control_frame::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10")]
+    #[prost(oneof="control_frame::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11")]
     pub payload: ::core::option::Option<control_frame::Payload>,
 }
 /// Nested message and enum types in `ControlFrame`.
@@ -175,6 +187,8 @@ pub mod control_frame {
         ReadOnlyViewerUpdate(super::ReadOnlyViewerUpdate),
         #[prost(message, tag="10")]
         SessionSize(super::SessionSize),
+        #[prost(message, tag="11")]
+        RevokeToken(super::RevokeToken),
     }
 }
 /// Envelope for all terminal-tunnel messages.

@@ -1,3 +1,4 @@
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -6,6 +7,7 @@ use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use zellij_relay::{
     registry::Registry,
+    relay_tunnel_auth_tokens::{store_new_relay_tunnel_auth_token, ENV_DATA_DIR},
     router::{build_router, AppState},
 };
 use zellij_relay_protocol::{
@@ -15,7 +17,25 @@ use zellij_relay_protocol::{
 
 const URL_TEMPLATE: &str = "http://localhost:8765/r/{slug}";
 
+/// Phase 6 Session C: all integration tests need a valid relay
+/// tunnel-auth token in the on-disk store. Point `RELAY_DATA_DIR` at a
+/// fresh scratch dir once per process and mint a single token; every
+/// `perform_control_handshake` picks up the same value.
+fn shared_test_token() -> &'static str {
+    static TOKEN: OnceLock<String> = OnceLock::new();
+    TOKEN.get_or_init(|| {
+        let scratch = std::env::temp_dir()
+            .join(format!("zellij-relay-it-{}", uuid::Uuid::new_v4()));
+        std::env::set_var(ENV_DATA_DIR, &scratch);
+        store_new_relay_tunnel_auth_token(Some("integration-test".into()))
+            .expect("mint relay tunnel auth token for integration tests")
+    })
+}
+
 async fn spawn_router() -> (String, String, Registry) {
+    // Touch the shared token once so `ENV_DATA_DIR` is always set
+    // before any handshake attempt reaches the token validation path.
+    let _ = shared_test_token();
     let state = AppState::new(URL_TEMPLATE.to_string());
     let registry = state.registry.clone();
     let app = build_router(state);
@@ -51,7 +71,7 @@ async fn perform_control_handshake(
     let url = format!("{}/tunnel/control", ws_base);
     let (mut ws_stream, _) = connect_async(&url).await.expect("connect control");
     let auth = ControlMessage::Auth {
-        token: String::new(),
+        token: shared_test_token().to_string(),
         session_name: "test-session".into(),
         protocol_version: PROTOCOL_VERSION,
         zellij_version: "0.45.0".into(),
@@ -654,7 +674,7 @@ async fn matching_zellij_version_serves_assets() {
     let url = format!("{}/tunnel/control", ws);
     let (mut ws_stream, _) = connect_async(&url).await.expect("connect control");
     let auth = ControlMessage::Auth {
-        token: String::new(),
+        token: shared_test_token().to_string(),
         session_name: "matching-version".into(),
         protocol_version: PROTOCOL_VERSION,
         zellij_version: env!("CARGO_PKG_VERSION").into(),
@@ -701,7 +721,7 @@ async fn mismatched_zellij_version_rejects_assets() {
     // crate version.
     let bogus_zellij_version = "0.1.0-from-the-past";
     let auth = ControlMessage::Auth {
-        token: String::new(),
+        token: shared_test_token().to_string(),
         session_name: "version-mismatch".into(),
         protocol_version: PROTOCOL_VERSION,
         zellij_version: bogus_zellij_version.into(),
@@ -936,4 +956,198 @@ async fn dropped_control_socket_evicts_registry() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// Phase 6 Session C: on `ControlMessage::RevokeToken { token_hash }`
+/// from the sharer, the relay tears down any matching r/o fan-out
+/// group — forcibly disconnecting every viewer in the group and
+/// purging the virtual-watcher mapping so further frames for the
+/// `active_client_id` no longer resolve. The cached r/o session is
+/// also dropped so a fresh `/session` POST with the same token falls
+/// through to a new `AuthChallenge`.
+#[tokio::test]
+async fn revoke_token_tears_down_ro_group() {
+    use serde_json::json;
+    use sha2::Digest;
+
+    let (http, ws, registry) = spawn_router().await;
+    let (mut control_ws, _public_url, slug, tunnel_id) =
+        perform_control_handshake(&ws).await;
+
+    // Link terminal tunnel so TerminalFrameData would route if needed.
+    let term_url = format!("{}/tunnel/terminal?slug={}", ws, slug);
+    let (mut terminal_ws, _) = connect_async(&term_url).await.expect("connect terminal");
+    let ready = TerminalMessage::Ready {
+        tunnel_id: tunnel_id.clone(),
+    };
+    terminal_ws
+        .send(Message::Binary(ready.encode()))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let session_url = format!("{}/r/{}/session", http, slug);
+    let raw_token = "revoke-me-ro-token";
+    let zellij_client_id = 41u32;
+    let token_hash = {
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(raw_token.as_bytes());
+        format!("{:x}", hasher.finalize())
+    };
+
+    // --- viewer #1: AuthChallenge round-trip ---
+    let http_client_a = reqwest::Client::builder()
+        .cookie_store(true)
+        .build()
+        .expect("client A");
+    let viewer_a_fut = async {
+        http_client_a
+            .post(&session_url)
+            .json(&json!({"auth_token": raw_token}))
+            .send()
+            .await
+            .expect("viewer A /session")
+    };
+    let zellij_fut = async {
+        let bytes = read_next_binary(&mut control_ws)
+            .await
+            .expect("AuthChallenge");
+        let request_id = match decode_control_frame(&bytes).expect("decode") {
+            ControlMessage::AuthChallenge { request_id, .. } => request_id,
+            other => panic!("expected AuthChallenge, got {:?}", other),
+        };
+        let response = ControlMessage::AuthResponse {
+            request_id,
+            client_id: zellij_client_id,
+            accepted: true,
+            is_read_only: true,
+            session_token_hash: "ignored".into(),
+            e2e_encrypted: true,
+        };
+        control_ws
+            .send(Message::Binary(response.encode()))
+            .await
+            .expect("AuthResponse");
+        // Count=1 join update.
+        let bytes = read_next_binary(&mut control_ws)
+            .await
+            .expect("count=1 update");
+        match decode_control_frame(&bytes).expect("decode") {
+            ControlMessage::ReadOnlyViewerUpdate { count, .. } => assert_eq!(count, 1),
+            other => panic!("expected ReadOnlyViewerUpdate, got {:?}", other),
+        }
+    };
+    let (resp_a, ()) = tokio::join!(viewer_a_fut, zellij_fut);
+    assert_eq!(resp_a.status(), reqwest::StatusCode::OK);
+    let set_cookie_a = extract_cookie(&resp_a);
+
+    // --- viewer #2: cached validation, no AuthChallenge ---
+    let http_client_b = reqwest::Client::builder()
+        .cookie_store(true)
+        .build()
+        .expect("client B");
+    let resp_b = http_client_b
+        .post(&session_url)
+        .json(&json!({"auth_token": raw_token}))
+        .send()
+        .await
+        .expect("viewer B /session");
+    assert_eq!(resp_b.status(), reqwest::StatusCode::OK);
+    let bytes = read_next_binary(&mut control_ws)
+        .await
+        .expect("count=2 update");
+    match decode_control_frame(&bytes).expect("decode") {
+        ControlMessage::ReadOnlyViewerUpdate { count, .. } => assert_eq!(count, 2),
+        other => panic!("expected ReadOnlyViewerUpdate, got {:?}", other),
+    }
+    let set_cookie_b = extract_cookie(&resp_b);
+
+    // --- connect viewer WS sockets so we can observe their disconnect ---
+    let mut ws_a = connect_viewer_ws(&http, &slug, &set_cookie_a).await;
+    let mut ws_b = connect_viewer_ws(&http, &slug, &set_cookie_b).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Sanity: the group is present with both viewers tracked.
+    {
+        let entry = registry.get(&slug).expect("tunnel registered");
+        let groups = entry.ro_groups.lock().unwrap();
+        let group = groups.get(&token_hash).expect("group present");
+        assert_eq!(group.viewer_ids.len(), 2, "two viewers in the group");
+        assert_eq!(group.active_client_id, Some(zellij_client_id));
+    }
+
+    // --- sharer emits RevokeToken for this token_hash ---
+    let revoke = ControlMessage::RevokeToken {
+        token_hash: token_hash.clone(),
+    };
+    control_ws
+        .send(Message::Binary(revoke.encode()))
+        .await
+        .expect("send RevokeToken");
+
+    // Both viewer WS sockets must close within a short window.
+    for (label, ws_stream) in [("A", &mut ws_a), ("B", &mut ws_b)] {
+        let closed = timeout(Duration::from_secs(2), async {
+            loop {
+                match ws_stream.next().await {
+                    None => return true,
+                    Some(Ok(Message::Close(_))) => return true,
+                    Some(Ok(_)) => continue,
+                    Some(Err(_)) => return true,
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("viewer {label}: did not disconnect within 2s"));
+        assert!(closed, "viewer {label}: expected close");
+    }
+
+    // Wait briefly for the control-tunnel reader to process the RevokeToken
+    // and mutate shared state.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Registry state: the group entry must be gone, and the
+    // `client_id_to_token_hash` mapping must be cleared.
+    {
+        let entry = registry.get(&slug).expect("tunnel still registered");
+        let groups = entry.ro_groups.lock().unwrap();
+        assert!(
+            groups.get(&token_hash).is_none(),
+            "r/o group must be removed after RevokeToken"
+        );
+        let id_map = entry.client_id_to_token_hash.lock().unwrap();
+        assert!(
+            id_map.get(&zellij_client_id).is_none(),
+            "client_id_to_token_hash must be purged"
+        );
+    }
+
+    // A subsequent `/session` POST with the same token must fall through
+    // to a fresh `AuthChallenge`: the validation cache for this hash is
+    // gone.
+    let http_client_c = reqwest::Client::builder()
+        .cookie_store(true)
+        .build()
+        .expect("client C");
+    let viewer_c_fut = async {
+        http_client_c
+            .post(&session_url)
+            .json(&json!({"auth_token": raw_token}))
+            .send()
+            .await
+            .expect("viewer C /session")
+    };
+    let wait_for_challenge = async {
+        let bytes = read_next_binary(&mut control_ws)
+            .await
+            .expect("fresh AuthChallenge");
+        match decode_control_frame(&bytes).expect("decode") {
+            ControlMessage::AuthChallenge { .. } => {},
+            other => panic!(
+                "expected a fresh AuthChallenge after RevokeToken, got {:?}",
+                other
+            ),
+        }
+    };
+    let (_resp_c, ()) = tokio::join!(viewer_c_fut, wait_for_challenge);
 }

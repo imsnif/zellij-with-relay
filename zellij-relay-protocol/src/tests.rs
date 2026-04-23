@@ -327,6 +327,32 @@ fn session_size_zero_dimensions_roundtrip() {
 }
 
 #[test]
+fn revoke_token_roundtrip() {
+    let original = ControlMessage::RevokeToken {
+        token_hash: "deadbeef1234".into(),
+    };
+    match decode_control_frame(&original.encode()).unwrap() {
+        ControlMessage::RevokeToken { token_hash } => {
+            assert_eq!(token_hash, "deadbeef1234");
+        },
+        other => panic!("expected RevokeToken, got {:?}", other),
+    }
+}
+
+#[test]
+fn revoke_token_empty_hash_roundtrip() {
+    let original = ControlMessage::RevokeToken {
+        token_hash: String::new(),
+    };
+    match decode_control_frame(&original.encode()).unwrap() {
+        ControlMessage::RevokeToken { token_hash } => {
+            assert!(token_hash.is_empty());
+        },
+        other => panic!("expected RevokeToken, got {:?}", other),
+    }
+}
+
+#[test]
 fn terminal_frame_data_roundtrip() {
     let original = TerminalMessage::TerminalFrameData {
         client_id: 11,

@@ -209,6 +209,7 @@ enum CommandName {
   DeleteAllDeadSessionsAndReply = 214;
   ShareCurrentSessionToRelay = 215;
   StopSharingCurrentSessionFromRelay = 216;
+  SetRelayTunnelAuthToken = 217;
 }
 
 message PluginCommand {
@@ -361,9 +362,18 @@ message PluginCommand {
     ClearPaneHighlightsPayload clear_pane_highlights_payload = 159;
     OpenPluginPaneFloatingPayload open_plugin_pane_floating_payload = 160;
     GetSessionListPayload get_session_list_payload = 161;
+<<<<<<< HEAD
     KillSessionsPayload kill_sessions_and_reply_payload = 162;
     string delete_dead_session_and_reply_payload = 163;
+||||||| parent of efbbd304 (phase 6 - session 3)
+=======
+    SetRelayTunnelAuthTokenPayload set_relay_tunnel_auth_token_payload = 162;
+>>>>>>> efbbd304 (phase 6 - session 3)
   }
+}
+
+message SetRelayTunnelAuthTokenPayload {
+  string token = 1;
 }
 
 message NewTabPayload {

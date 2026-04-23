@@ -11,6 +11,7 @@ pub async fn open_control_tunnel(
     relay_url: &str,
     session_name: String,
     zellij_version: String,
+    relay_tunnel_auth_token: String,
     requested_slug: String,
 ) -> Result<ControlTunnelSession> {
     let url = format!("{}/tunnel/control", relay_url.trim_end_matches('/'));
@@ -20,7 +21,7 @@ pub async fn open_control_tunnel(
     let (mut sink, mut stream) = ws_stream.split();
 
     let auth = ControlMessage::Auth {
-        token: String::new(),
+        token: relay_tunnel_auth_token,
         session_name,
         protocol_version: PROTOCOL_VERSION,
         zellij_version,
