@@ -303,6 +303,63 @@ pub fn build_wasm_clip(
     Ok(())
 }
 
+/// Copy `zellij-web-client-assets/assets/` into
+/// `zellij-relay/assets/<version>/`. Called from `pipelines::publish`
+/// right after the `wasm_clip` build, so the fresh `clip.wasm` is part
+/// of the snapshot. The resulting files are picked up by the release
+/// commit alongside the other regenerated assets.
+pub fn snapshot_web_assets_for_relay(sh: &Shell, version: &str) -> anyhow::Result<()> {
+    let root = crate::project_root();
+    let src = root.join("zellij-web-client-assets").join("assets");
+    let dst = root.join("zellij-relay").join("assets").join(version);
+
+    if !src.is_dir() {
+        return Err(anyhow::anyhow!(
+            "expected source asset directory at '{}'",
+            src.display()
+        ));
+    }
+
+    // Rewrite-from-scratch so a re-run at the same version does not
+    // retain stale files (e.g. an asset removed upstream).
+    if dst.exists() {
+        std::fs::remove_dir_all(&dst)
+            .with_context(|| format!("failed to clear existing snapshot at {}", dst.display()))?;
+    }
+    std::fs::create_dir_all(&dst)
+        .with_context(|| format!("failed to create {}", dst.display()))?;
+
+    copy_dir_recursive(sh, &src, &dst)
+        .with_context(|| format!("failed to snapshot {} -> {}", src.display(), dst.display()))?;
+
+    println!(
+        ">> relay web-client asset snapshot written to {}",
+        dst.display()
+    );
+    Ok(())
+}
+
+fn copy_dir_recursive(sh: &Shell, src: &Path, dst: &Path) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(src)
+            .expect("directory walk stays inside src");
+        let target = dst.join(relative);
+        if path.is_dir() {
+            std::fs::create_dir_all(&target)?;
+            copy_dir_recursive(sh, &path, &target)?;
+        } else if path.is_file() {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            sh.copy_file(&path, &target)?;
+        }
+    }
+    Ok(())
+}
+
 fn move_plugin_to_assets(sh: &Shell, plugin_name: &str) -> anyhow::Result<()> {
     let err_context = || format!("failed to move plugin '{plugin_name}' to assets folder");
 

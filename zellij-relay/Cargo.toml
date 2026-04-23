@@ -11,6 +11,7 @@ anyhow = { workspace = true }
 axum = { version = "0.8.4", features = ["ws"] }
 axum-extra = { version = "0.10.1", features = ["cookie"] }
 futures-util = "0.3"
+include_dir = { workspace = true }
 log = { workspace = true }
 prost = { workspace = true }
 rand = "0.8"

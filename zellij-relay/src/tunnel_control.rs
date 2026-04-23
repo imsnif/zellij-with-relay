@@ -27,7 +27,7 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, Notify};
 use uuid::Uuid;
-use zellij_relay_protocol::{decode_control_frame, ControlMessage};
+use zellij_relay_protocol::{decode_control_frame, ControlMessage, SUPPORTED_PROTOCOL_VERSIONS};
 
 use crate::heartbeat::{now_millis, spawn_server_heartbeat, HEARTBEAT_TIMEOUT_SECS};
 
@@ -63,19 +63,42 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         },
     };
 
-    let (session_name, zellij_version, requested_slug) = match msg {
+    let (session_name, zellij_version, requested_slug, protocol_version) = match msg {
         ControlMessage::Auth {
             session_name,
             zellij_version,
             requested_slug,
+            protocol_version,
             ..
-        } => (session_name, zellij_version, requested_slug),
+        } => (session_name, zellij_version, requested_slug, protocol_version),
         other => {
             tracing::warn!(?other, "control tunnel first message was not Auth");
             let _ = send_error(&mut socket, "first frame must be TunnelAuth").await;
             return;
         },
     };
+
+    // Reject tunnels whose declared `protocol_version` falls outside the
+    // supported range with a templated `TunnelError`. The sharer's plugin
+    // keys off the "Relay requires protocol version" substring to render
+    // a dedicated protocol-mismatch state.
+    if !SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol_version) {
+        let message = format!(
+            "Relay requires protocol version {}\u{2013}{}, but this Zellij speaks version {}. Please update Zellij.",
+            SUPPORTED_PROTOCOL_VERSIONS.start(),
+            SUPPORTED_PROTOCOL_VERSIONS.end(),
+            protocol_version,
+        );
+        tracing::warn!(
+            protocol_version,
+            supported_start = *SUPPORTED_PROTOCOL_VERSIONS.start(),
+            supported_end = *SUPPORTED_PROTOCOL_VERSIONS.end(),
+            %zellij_version,
+            "rejecting tunnel: protocol version mismatch"
+        );
+        let _ = send_error(&mut socket, &message).await;
+        return;
+    }
 
     // Phase 6 reconnect: honour the client's `requested_slug` if it was
     // supplied and is still free. Occupied slugs fall back to a fresh

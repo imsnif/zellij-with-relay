@@ -646,6 +646,278 @@ async fn expect_update(control_ws: &mut WsStream, expected: u32) {
     }
 }
 
+/// When the tunnel's `zellij_version` matches the relay's own crate
+/// version, asset requests succeed and serve the live embedded bundle.
+#[tokio::test]
+async fn matching_zellij_version_serves_assets() {
+    let (http, ws, _registry) = spawn_router().await;
+    let url = format!("{}/tunnel/control", ws);
+    let (mut ws_stream, _) = connect_async(&url).await.expect("connect control");
+    let auth = ControlMessage::Auth {
+        token: String::new(),
+        session_name: "matching-version".into(),
+        protocol_version: PROTOCOL_VERSION,
+        zellij_version: env!("CARGO_PKG_VERSION").into(),
+        requested_slug: String::new(),
+    };
+    ws_stream
+        .send(Message::Binary(auth.encode()))
+        .await
+        .unwrap();
+    let reply_bytes = read_next_binary(&mut ws_stream)
+        .await
+        .expect("established reply");
+    let slug = match decode_control_frame(&reply_bytes).expect("decode") {
+        ControlMessage::Established { slug, .. } => slug,
+        other => panic!("expected Established, got {:?}", other),
+    };
+
+    let asset_url = format!("{}/r/{}/assets/index.html", http, slug);
+    let resp = reqwest::get(&asset_url)
+        .await
+        .expect("asset GET");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|h| h.to_str().ok()),
+        Some("text/html")
+    );
+    let body = resp.text().await.expect("body");
+    assert!(!body.is_empty(), "served asset should have content");
+}
+
+/// When the tunnel's `zellij_version` does not match the relay's crate
+/// version and no committed on-disk snapshot exists for it, asset
+/// requests under `/r/<slug>/assets/...` return 404 with a "Zellij
+/// version X not supported by this relay" upgrade hint.
+#[tokio::test]
+async fn mismatched_zellij_version_rejects_assets() {
+    let (http, ws, _registry) = spawn_router().await;
+    let url = format!("{}/tunnel/control", ws);
+    let (mut ws_stream, _) = connect_async(&url).await.expect("connect control");
+    // Protocol version is in range (so handshake succeeds) but the
+    // declared Zellij version is deliberately different from the relay
+    // crate version.
+    let bogus_zellij_version = "0.1.0-from-the-past";
+    let auth = ControlMessage::Auth {
+        token: String::new(),
+        session_name: "version-mismatch".into(),
+        protocol_version: PROTOCOL_VERSION,
+        zellij_version: bogus_zellij_version.into(),
+        requested_slug: String::new(),
+    };
+    ws_stream
+        .send(Message::Binary(auth.encode()))
+        .await
+        .unwrap();
+    let reply_bytes = read_next_binary(&mut ws_stream)
+        .await
+        .expect("established reply");
+    let slug = match decode_control_frame(&reply_bytes).expect("decode") {
+        ControlMessage::Established { slug, .. } => slug,
+        other => panic!("expected Established, got {:?}", other),
+    };
+
+    let asset_url = format!("{}/r/{}/assets/index.js", http, slug);
+    let resp = reqwest::get(&asset_url)
+        .await
+        .expect("asset GET");
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+    let body = resp.text().await.expect("body");
+    assert!(
+        body.contains("not supported by this relay") && body.contains(bogus_zellij_version),
+        "unexpected 404 body: {body}"
+    );
+}
+
+/// The relay validates `TunnelAuth.protocol_version` against its
+/// supported range. A mismatched version draws a templated `TunnelError`
+/// and the tunnel is not registered.
+#[tokio::test]
+async fn protocol_version_mismatch_rejected() {
+    let (_http, ws, _registry) = spawn_router().await;
+    let url = format!("{}/tunnel/control", ws);
+    let (mut ws_stream, _) = connect_async(&url).await.expect("connect control");
+    // Bogus future protocol version — relay must reject.
+    let auth = ControlMessage::Auth {
+        token: String::new(),
+        session_name: "mismatch-session".into(),
+        protocol_version: 99,
+        zellij_version: "0.99.0".into(),
+        requested_slug: String::new(),
+    };
+    ws_stream
+        .send(Message::Binary(auth.encode()))
+        .await
+        .unwrap();
+
+    let reply_bytes = read_next_binary(&mut ws_stream)
+        .await
+        .expect("error reply");
+    match decode_control_frame(&reply_bytes).expect("decode") {
+        ControlMessage::Error { message } => {
+            assert!(
+                message.contains("Relay requires protocol version"),
+                "unexpected error text: {message}"
+            );
+            assert!(
+                message.contains("99"),
+                "expected the rejected version surfaced in the message: {message}"
+            );
+        },
+        other => panic!("expected TunnelError, got {:?}", other),
+    }
+
+    // No `Established` frame should arrive on the same socket — the
+    // relay closes after sending the error.
+    let next = timeout(Duration::from_millis(200), ws_stream.next()).await;
+    match next {
+        Ok(Some(Ok(Message::Close(_)))) | Ok(None) | Err(_) => {},
+        Ok(Some(Ok(msg))) => {
+            if let Message::Binary(b) = msg {
+                if let Ok(ControlMessage::Established { .. }) =
+                    decode_control_frame(&b)
+                {
+                    panic!("relay must not register a tunnel after protocol mismatch");
+                }
+            }
+        },
+        Ok(Some(Err(_))) => {},
+    }
+}
+
+/// The relay caps simultaneous r/w viewers at `MAX_RW_VIEWERS` (10).
+/// Ten r/w registrations succeed; the eleventh falls through to a
+/// uniform 401. Read-only viewers share a single virtual watcher and are
+/// unaffected (covered by `ro_fanout_three_viewers`).
+#[tokio::test]
+async fn rw_viewer_cap_enforced_at_ten() {
+    use serde_json::json;
+    use reqwest::StatusCode;
+
+    let (http, ws, _registry) = spawn_router().await;
+    let (mut control_ws, _public_url, slug, _tunnel_id) =
+        perform_control_handshake(&ws).await;
+
+    let session_url = format!("{}/r/{}/session", http, slug);
+
+    // Ten sequential r/w registrations: each drives one AuthChallenge →
+    // AuthResponse → ClientConnected round-trip. Sequential keeps the
+    // control tunnel frame order deterministic for the test; the relay's
+    // cap logic does not depend on concurrency.
+    let mut allocated_ids = Vec::with_capacity(10);
+    for (idx, expected_id) in (100..110u32).enumerate() {
+        let client = reqwest::Client::builder()
+            .cookie_store(true)
+            .build()
+            .expect("reqwest client");
+        let body = json!({"auth_token": format!("rw-token-{idx}")});
+        let viewer_fut = async {
+            client
+                .post(&session_url)
+                .json(&body)
+                .send()
+                .await
+                .expect("viewer /session POST")
+        };
+        let zellij_fut = async {
+            let bytes = read_next_binary(&mut control_ws)
+                .await
+                .expect("AuthChallenge");
+            let challenge =
+                decode_control_frame(&bytes).expect("decode AuthChallenge");
+            let request_id = match challenge {
+                ControlMessage::AuthChallenge { request_id, .. } => request_id,
+                other => panic!("expected AuthChallenge, got {:?}", other),
+            };
+            let response = ControlMessage::AuthResponse {
+                request_id,
+                client_id: expected_id,
+                accepted: true,
+                is_read_only: false,
+                session_token_hash: "ignored".into(),
+                e2e_encrypted: true,
+            };
+            control_ws
+                .send(Message::Binary(response.encode()))
+                .await
+                .expect("send AuthResponse");
+            let bytes = read_next_binary(&mut control_ws)
+                .await
+                .expect("ClientConnected");
+            match decode_control_frame(&bytes).expect("decode") {
+                ControlMessage::ClientConnected { client_id } => client_id,
+                other => panic!("expected ClientConnected, got {:?}", other),
+            }
+        };
+        let (resp, cid) = tokio::join!(viewer_fut, zellij_fut);
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "viewer {idx} must be accepted"
+        );
+        allocated_ids.push(cid);
+    }
+    assert_eq!(allocated_ids.len(), 10);
+
+    // 11th viewer: the relay's cap check runs *after* AuthChallenge
+    // round-trip (the cap sits in the r/w branch of `register_viewer`
+    // after `challenge_once` and after the `is_read_only` short-circuit).
+    // The observable effect at the viewer is a uniform 401.
+    let client = reqwest::Client::builder()
+        .cookie_store(true)
+        .build()
+        .expect("reqwest client");
+    let viewer_fut = async {
+        client
+            .post(&session_url)
+            .json(&json!({"auth_token": "rw-token-11"}))
+            .send()
+            .await
+            .expect("11th viewer /session POST")
+    };
+
+    let zellij_fut = async {
+        let bytes = read_next_binary(&mut control_ws)
+            .await
+            .expect("11th AuthChallenge");
+        let challenge =
+            decode_control_frame(&bytes).expect("decode AuthChallenge");
+        let request_id = match challenge {
+            ControlMessage::AuthChallenge { request_id, .. } => request_id,
+            other => panic!("expected AuthChallenge, got {:?}", other),
+        };
+        let response = ControlMessage::AuthResponse {
+            request_id,
+            client_id: 999,
+            accepted: true,
+            is_read_only: false,
+            session_token_hash: "ignored".into(),
+            e2e_encrypted: true,
+        };
+        control_ws
+            .send(Message::Binary(response.encode()))
+            .await
+            .expect("send AuthResponse");
+    };
+
+    let (resp_eleventh, ()) = tokio::join!(viewer_fut, zellij_fut);
+    assert_eq!(
+        resp_eleventh.status(),
+        StatusCode::UNAUTHORIZED,
+        "11th r/w viewer must be rejected by the cap"
+    );
+
+    // Belt-and-braces: no ClientConnected emitted for the 999 id.
+    let quick =
+        timeout(Duration::from_millis(200), read_next_binary(&mut control_ws)).await;
+    assert!(
+        quick.is_err(),
+        "no ClientConnected expected after cap rejection, but got a frame"
+    );
+}
+
 #[tokio::test]
 async fn dropped_control_socket_evicts_registry() {
     let (_http, ws, registry) = spawn_router().await;

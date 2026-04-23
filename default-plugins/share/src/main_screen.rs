@@ -223,12 +223,18 @@ impl<'a> MainScreen<'a> {
     }
 
     fn render_remote_share_url(&self, layout: &Layout, y: usize) -> usize {
-        // Phase 6 (Session A): `remote_share_url` is either a live URL,
-        // `__RELAY_RECONNECTING__:<attempt>` while the supervisor is
-        // retrying, or `__RELAY_FAILED__:<message>` on permanent failure.
-        // Decode the sentinel prefixes and render state-specific copy.
+        // `remote_share_url` is either a live URL, one of two status
+        // sentinels, or None. The sentinels:
+        //   `__RELAY_RECONNECTING__:<attempt>` — supervisor retrying
+        //   `__RELAY_FAILED__:<message>`       — permanent failure
+        // Within the Failed branch we key off the relay's
+        // "Relay requires protocol version" error template to render a
+        // dedicated protocol-mismatch label (the Zellij client prepends
+        // `relay rejected tunnel: ` before the IPC, so a substring match
+        // is the robust check).
         const RECONNECTING: &str = "__RELAY_RECONNECTING__:";
         const FAILED: &str = "__RELAY_FAILED__:";
+        const PROTOCOL_MISMATCH_NEEDLE: &str = "Relay requires protocol version";
         match self.remote_share_url {
             Some(url) if url.starts_with(RECONNECTING) => {
                 let attempt = &url[RECONNECTING.len()..];
@@ -241,6 +247,20 @@ impl<'a> MainScreen<'a> {
                     .color_range(2, ..10)
                     .color_range(1, 12..stop_hint_start)
                     .color_range(3, stop_hint_start..);
+                print_text_with_coordinates(text, layout.base_x, y, None, None);
+                y + 2
+            },
+            Some(url)
+                if url.starts_with(FAILED)
+                    && url[FAILED.len()..].contains(PROTOCOL_MISMATCH_NEEDLE) =>
+            {
+                let label =
+                    "Public URL: <protocol mismatch — please upgrade Zellij> (<i> - Retry)";
+                let retry_hint_start = label.len() - "(<i> - Retry)".len();
+                let text = Text::new(label)
+                    .color_range(2, ..10)
+                    .color_range(1, 12..retry_hint_start)
+                    .color_range(3, retry_hint_start..);
                 print_text_with_coordinates(text, layout.base_x, y, None, None);
                 y + 2
             },
