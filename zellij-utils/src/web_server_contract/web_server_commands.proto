@@ -8,7 +8,15 @@ message InstructionForWebServer {
     StartRelayTunnelMsg start_relay_tunnel = 3;
     StopRelayTunnelMsg stop_relay_tunnel = 4;
     GetRelayTunnelStatusMsg get_relay_tunnel_status = 5;
+    RevokeRelayTokenMsg revoke_relay_token = 6;
   }
+}
+
+// Phase 6 Session C: propagate a viewer-token revocation from the Zellij
+// server process into the web-server process, so it can be forwarded to
+// every active relay tunnel.
+message RevokeRelayTokenMsg {
+  string token_hash = 1;
 }
 
 message ShutdownWebServerMsg {
@@ -22,6 +30,10 @@ message StartRelayTunnelMsg {
   string session_name = 2;
   string relay_url = 3;
   string zellij_version = 4;
+  // Phase 6 Session C: shared-secret tunnel-auth token. Empty string
+  // means "not configured"; the relay rejects with
+  // `TunnelError { message: "relay tunnel auth rejected" }`.
+  string relay_tunnel_auth_token = 5;
 }
 
 message StopRelayTunnelMsg {

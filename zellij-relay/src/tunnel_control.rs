@@ -31,7 +31,10 @@ use zellij_relay_protocol::{decode_control_frame, ControlMessage, SUPPORTED_PROT
 
 use crate::heartbeat::{now_millis, spawn_server_heartbeat, HEARTBEAT_TIMEOUT_SECS};
 
-use crate::registry::{AuthResponseResult, TunnelEntry};
+use crate::registry::{AuthResponseResult, TunnelEntry, ViewerRouting};
+use crate::relay_tunnel_auth_tokens::{
+    hash_relay_tunnel_auth_token, validate_relay_tunnel_auth_token_hash,
+};
 use crate::router::AppState;
 use crate::slug;
 
@@ -63,14 +66,20 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         },
     };
 
-    let (session_name, zellij_version, requested_slug, protocol_version) = match msg {
+    let (token, session_name, zellij_version, requested_slug, protocol_version) = match msg {
         ControlMessage::Auth {
+            token,
             session_name,
             zellij_version,
             requested_slug,
             protocol_version,
-            ..
-        } => (session_name, zellij_version, requested_slug, protocol_version),
+        } => (
+            token,
+            session_name,
+            zellij_version,
+            requested_slug,
+            protocol_version,
+        ),
         other => {
             tracing::warn!(?other, "control tunnel first message was not Auth");
             let _ = send_error(&mut socket, "first frame must be TunnelAuth").await;
@@ -97,6 +106,31 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             "rejecting tunnel: protocol version mismatch"
         );
         let _ = send_error(&mut socket, &message).await;
+        return;
+    }
+
+    // Phase 6 Session C: tunnel-auth token check. Empty or unknown token
+    // hashes are rejected uniformly as "relay tunnel auth rejected" — the
+    // sharer-side share plugin keys off that exact substring to surface
+    // the `<relay rejected auth token>` state. A DB error is treated as
+    // a rejection as well so mis-provisioned relays never silently admit
+    // connections.
+    let hash = hash_relay_tunnel_auth_token(&token);
+    let accepted = match validate_relay_tunnel_auth_token_hash(&hash) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(error = %e, "relay_tunnel_auth_tokens DB error; rejecting tunnel");
+            false
+        },
+    };
+    if !accepted {
+        tracing::info!(
+            %zellij_version,
+            %session_name,
+            empty_token = token.is_empty(),
+            "rejecting tunnel: relay tunnel auth rejected"
+        );
+        let _ = send_error(&mut socket, "relay tunnel auth rejected").await;
         return;
     }
 
@@ -368,6 +402,89 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                         }
                     }
                 }
+            },
+            ControlMessage::RevokeToken { token_hash } => {
+                // Tear down any state keyed on this token hash. Covers both
+                // r/o (fan-out group) and r/w (single viewer). Viewers are
+                // forcibly disconnected via their stored oneshots; sessions
+                // are purged so a subsequent cookie-reuse `/session` POST
+                // fails at the resolve step; `client_id_to_token_hash` and
+                // `client_id_to_viewer` are cleaned up so stale ids cannot
+                // be resurrected by frame-dispatch paths.
+                if token_hash.is_empty() {
+                    tracing::warn!(
+                        slug = %reader_entry.slug,
+                        "RevokeToken with empty token_hash, ignoring"
+                    );
+                    continue;
+                }
+
+                let mut viewer_ids_to_disconnect: Vec<Uuid> = Vec::new();
+
+                // r/o path: remove the whole fan-out group, stash every
+                // viewer id for disconnection, drop the virtual watcher
+                // mapping.
+                let removed_group = reader_entry
+                    .ro_groups
+                    .lock()
+                    .unwrap()
+                    .remove(&token_hash);
+                if let Some(group) = removed_group {
+                    if let Some(active_client_id) = group.active_client_id {
+                        reader_entry
+                            .client_id_to_token_hash
+                            .lock()
+                            .unwrap()
+                            .remove(&active_client_id);
+                    }
+                    viewer_ids_to_disconnect.extend(group.viewer_ids);
+                }
+
+                // r/w path + r/o session purge: walk all sessions, collect
+                // those whose token_hash matches. For r/w sessions, drop
+                // the client_id_to_viewer mapping too.
+                let matching_session_ids: Vec<Uuid> = {
+                    let sessions = reader_entry.sessions.lock().unwrap();
+                    sessions
+                        .iter()
+                        .filter(|(_, s)| s.token_hash == token_hash)
+                        .map(|(sid, _)| *sid)
+                        .collect()
+                };
+                {
+                    let mut sessions = reader_entry.sessions.lock().unwrap();
+                    for sid in &matching_session_ids {
+                        if let Some(session) = sessions.remove(sid) {
+                            viewer_ids_to_disconnect.push(session.viewer_id);
+                            if let ViewerRouting::Rw(client_id) = session.routing {
+                                reader_entry
+                                    .client_id_to_viewer
+                                    .lock()
+                                    .unwrap()
+                                    .remove(&client_id);
+                            }
+                        }
+                    }
+                }
+
+                // Fire disconnect oneshots for every resolved viewer id.
+                let mut viewers = reader_entry.viewers.lock().unwrap();
+                let disconnected = viewer_ids_to_disconnect.len();
+                for vid in viewer_ids_to_disconnect {
+                    if let Some(mut handle) = viewers.remove(&vid) {
+                        if let Some(tx) = handle.disconnect_terminal.take() {
+                            let _ = tx.send(());
+                        }
+                        if let Some(tx) = handle.disconnect_control.take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                }
+                tracing::info!(
+                    slug = %reader_entry.slug,
+                    disconnected,
+                    "RevokeToken: torn down viewers for token hash"
+                );
             },
             ControlMessage::Error { message } => {
                 tracing::warn!(slug = %reader_entry.slug, %message, "relay-peer control error");

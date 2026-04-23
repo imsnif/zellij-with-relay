@@ -137,6 +137,10 @@ pub enum ServerInstruction {
     StopSharingCurrentSession(ClientId),
     ShareCurrentSessionToRelay(ClientId),
     StopSharingCurrentSessionFromRelay(ClientId),
+    /// Phase 6 Session C: persist the relay tunnel auth token for this
+    /// client's runtime config. Empty string clears it. Handled by
+    /// writing into `SessionConfiguration` for the client.
+    SetRelayTunnelAuthToken(ClientId, String),
     RelayTunnelReady {
         client_id: ClientId,
         public_url: Option<String>,
@@ -196,6 +200,9 @@ impl From<&ServerInstruction> for ServerContext {
             },
             ServerInstruction::StopSharingCurrentSessionFromRelay(..) => {
                 ServerContext::StopSharingCurrentSessionFromRelay
+            },
+            ServerInstruction::SetRelayTunnelAuthToken(..) => {
+                ServerContext::SetRelayTunnelAuthToken
             },
             ServerInstruction::RelayTunnelReady { .. } => ServerContext::RelayTunnelReady,
             ServerInstruction::WebServerStarted(..) => ServerContext::WebServerStarted,
@@ -1912,17 +1919,22 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                     if !is_sharing {
                         log::error!("Cannot start relay tunnel: web sharing is not enabled");
                     } else {
-                        let relay_url = session_data
+                        let (relay_url, relay_tunnel_auth_token) = session_data
                             .read()
                             .ok()
                             .and_then(|s| {
-                                s.as_ref().and_then(|s| {
-                                    s.session_configuration
+                                s.as_ref().map(|s| {
+                                    let opts = &s
+                                        .session_configuration
                                         .get_client_configuration(&client_id)
-                                        .options
-                                        .relay_server_url
+                                        .options;
+                                    (
+                                        opts.relay_server_url.clone(),
+                                        opts.relay_tunnel_auth_token.clone(),
+                                    )
                                 })
-                            });
+                            })
+                            .unwrap_or((None, None));
                         match relay_url {
                             None => {
                                 log::error!(
@@ -1932,6 +1944,8 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                             Some(relay_url) => {
                                 let session_name = envs::get_session_name().unwrap_or_default();
                                 let zellij_version = zellij_utils::consts::VERSION.to_string();
+                                let relay_tunnel_auth_token =
+                                    relay_tunnel_auth_token.unwrap_or_default();
                                 let to_server = to_server.clone();
                                 thread::spawn(move || {
                                     let sockets: Vec<std::path::PathBuf> =
@@ -1958,6 +1972,7 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                                             session_name,
                                             relay_url,
                                             zellij_version,
+                                            relay_tunnel_auth_token,
                                         };
                                     let result = query_webserver_with_response(
                                         &path_str,
@@ -2112,6 +2127,27 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                     log::error!(
                         "Cannot stop relay tunnel: compiled without web_server_capability"
                     );
+                }
+            },
+            ServerInstruction::SetRelayTunnelAuthToken(client_id, token) => {
+                // Persist the token into the client's runtime configuration
+                // so the next `ShareCurrentSessionToRelay` pulls it through
+                // via `get_client_configuration`. Empty string clears the
+                // slot. The value is kept in process memory only — the
+                // saved KDL file on disk is not mutated by this path
+                // (users who want persistence can write it there
+                // themselves, mirroring the existing `--relay-server-url`
+                // pattern).
+                if let Ok(mut guard) = session_data.write() {
+                    if let Some(sd) = guard.as_mut() {
+                        let mut config = sd
+                            .session_configuration
+                            .get_client_configuration(&client_id);
+                        config.options.relay_tunnel_auth_token =
+                            if token.is_empty() { None } else { Some(token) };
+                        sd.session_configuration
+                            .set_client_runtime_configuration(client_id, config);
+                    }
                 }
             },
             ServerInstruction::RelayTunnelReady { client_id: _, public_url } => {

@@ -1953,6 +1953,8 @@ pub struct Options {
     pub relay_server_url: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(bool, optional, tag="49")]
     pub encrypt_web_sharing: ::core::option::Option<bool>,
+    #[prost(string, optional, tag="50")]
+    pub relay_tunnel_auth_token: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// Pane-targeting action messages
 #[allow(clippy::derive_partial_eq_without_eq)]

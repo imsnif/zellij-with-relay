@@ -206,6 +206,7 @@ enum CommandName {
   GetSessionList = 211;
   ShareCurrentSessionToRelay = 212;
   StopSharingCurrentSessionFromRelay = 213;
+  SetRelayTunnelAuthToken = 214;
 }
 
 message PluginCommand {
@@ -358,7 +359,12 @@ message PluginCommand {
     ClearPaneHighlightsPayload clear_pane_highlights_payload = 159;
     OpenPluginPaneFloatingPayload open_plugin_pane_floating_payload = 160;
     GetSessionListPayload get_session_list_payload = 161;
+    SetRelayTunnelAuthTokenPayload set_relay_tunnel_auth_token_payload = 162;
   }
+}
+
+message SetRelayTunnelAuthTokenPayload {
+  string token = 1;
 }
 
 message NewTabPayload {

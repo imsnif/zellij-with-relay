@@ -61,6 +61,9 @@ pub enum ControlMessage {
         rows: u32,
         cols: u32,
     },
+    RevokeToken {
+        token_hash: String,
+    },
 }
 
 /// High-level Rust view of a terminal-tunnel frame.
@@ -180,6 +183,9 @@ impl From<ControlMessage> for proto::ControlFrame {
                 rows,
                 cols,
             }),
+            ControlMessage::RevokeToken { token_hash } => {
+                Payload::RevokeToken(proto::RevokeToken { token_hash })
+            },
         };
         proto::ControlFrame {
             payload: Some(payload),
@@ -238,6 +244,9 @@ impl TryFrom<proto::ControlFrame> for ControlMessage {
                 client_id: s.client_id,
                 rows: s.rows,
                 cols: s.cols,
+            }),
+            Some(Payload::RevokeToken(r)) => Ok(ControlMessage::RevokeToken {
+                token_hash: r.token_hash,
             }),
             None => Err(anyhow!("ControlFrame has no payload")),
         }

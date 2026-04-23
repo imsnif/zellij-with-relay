@@ -45,7 +45,7 @@ use zellij_utils::ipc::{ClientToServerMsg, IpcSenderWithContext};
 use zellij_utils::sessions::generate_random_name as generate_random_name_impl;
 #[cfg(feature = "web_server_capability")]
 use zellij_utils::web_authentication_tokens::{
-    create_token, list_tokens, rename_token, revoke_all_tokens, revoke_token,
+    create_token, list_tokens, rename_token, revoke_all_tokens, revoke_token_and_return_hash,
 };
 #[cfg(feature = "web_server_capability")]
 use zellij_utils::web_server_commands::shutdown_all_webserver_instances;
@@ -662,6 +662,9 @@ fn host_run_plugin_command(mut caller: Caller<'_, PluginEnv>) {
                     },
                     PluginCommand::StopSharingCurrentSessionFromRelay => {
                         stop_sharing_current_session_from_relay(env)
+                    },
+                    PluginCommand::SetRelayTunnelAuthToken(token) => {
+                        set_relay_tunnel_auth_token(env, token);
                     },
                     PluginCommand::SetSelfMouseSelectionSupport(selection_support) => {
                         set_self_mouse_selection_support(env, selection_support);
@@ -4875,6 +4878,15 @@ fn stop_sharing_current_session_from_relay(env: &PluginEnv) {
         ));
 }
 
+fn set_relay_tunnel_auth_token(env: &PluginEnv, token: String) {
+    let _ = env
+        .senders
+        .send_to_server(ServerInstruction::SetRelayTunnelAuthToken(
+            env.client_id,
+            token,
+        ));
+}
+
 fn group_and_ungroup_panes(
     env: &PluginEnv,
     panes_to_group: Vec<PaneId>,
@@ -4962,12 +4974,22 @@ fn generate_web_login_token(env: &PluginEnv, _token_label: Option<String>, _read
 
 #[cfg(feature = "web_server_capability")]
 fn revoke_web_login_token(env: &PluginEnv, token_label: String) {
-    let serialized = match revoke_token(&token_label) {
-        Ok(true) => RevokeTokenResponse {
-            successfully_revoked: true,
-            error: None,
+    let serialized = match revoke_token_and_return_hash(&token_label) {
+        Ok(Some(token_hash)) => {
+            // Phase 6 Session C: propagate the revocation to every
+            // active relay tunnel so connected viewers (r/o fan-out
+            // groups or r/w sessions) are disconnected immediately.
+            // Fire-and-forget: a web server that's down, or a relay
+            // tunnel that dropped, is silently skipped — the local DB
+            // is already authoritative for future `AuthChallenge`
+            // round-trips.
+            propagate_relay_token_revocation(token_hash);
+            RevokeTokenResponse {
+                successfully_revoked: true,
+                error: None,
+            }
         },
-        Ok(false) => RevokeTokenResponse {
+        Ok(None) => RevokeTokenResponse {
             successfully_revoked: false,
             error: Some(format!("Token with label {} not found", token_label)),
         },
@@ -4977,6 +4999,40 @@ fn revoke_web_login_token(env: &PluginEnv, token_label: String) {
         },
     };
     let _ = wasi_write_object(env, &serialized.encode_to_vec());
+}
+
+/// Phase 6 Session C: relay-side revocation broadcast helper. Pushes a
+/// `RevokeRelayToken { token_hash }` IPC onto every discoverable
+/// web-server socket. Runs on a detached thread because
+/// `query_webserver_with_response` is blocking and this helper is
+/// called from the plugin-command dispatch path.
+#[cfg(feature = "web_server_capability")]
+fn propagate_relay_token_revocation(token_hash: String) {
+    use zellij_utils::web_server_commands::{
+        discover_webserver_sockets, query_webserver_with_response, InstructionForWebServer,
+    };
+    std::thread::spawn(move || {
+        let sockets = match discover_webserver_sockets() {
+            Ok(s) => s,
+            Err(e) => {
+                log::debug!("RevokeRelayToken: no web server sockets discovered: {}", e);
+                return;
+            },
+        };
+        for path in sockets {
+            let path_str = path.to_str().unwrap_or("").to_string();
+            let instruction = InstructionForWebServer::RevokeRelayToken {
+                token_hash: token_hash.clone(),
+            };
+            if let Err(e) = query_webserver_with_response(&path_str, instruction, 5_000) {
+                log::debug!(
+                    "RevokeRelayToken: web server IPC on {} returned error: {}",
+                    path_str,
+                    e
+                );
+            }
+        }
+    });
 }
 
 #[cfg(not(feature = "web_server_capability"))]
@@ -5382,6 +5438,7 @@ fn check_command_permission(
         | PluginCommand::StopSharingCurrentSession
         | PluginCommand::ShareCurrentSessionToRelay
         | PluginCommand::StopSharingCurrentSessionFromRelay
+        | PluginCommand::SetRelayTunnelAuthToken(..)
         | PluginCommand::StopWebServer
         | PluginCommand::QueryWebServerStatus
         | PluginCommand::GenerateWebLoginToken(..)

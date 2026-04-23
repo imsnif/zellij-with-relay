@@ -14,6 +14,12 @@ use token_screen::TokenScreen;
 
 static WEB_SERVER_QUERY_DURATION: f64 = 0.4; // Doherty threshold
 
+/// Substring of the relay's "relay tunnel auth rejected" error
+/// surfaced inside the `__RELAY_FAILED__:` sentinel. Recognised by
+/// the main screen so the auth-rejection branch renders distinctly
+/// from the generic "<relay unreachable>" branch.
+pub const AUTH_REJECTED_NEEDLE: &str = "relay tunnel auth rejected";
+
 #[derive(Debug, Default)]
 struct App {
     web_server: WebServerState,
@@ -44,6 +50,7 @@ impl ZellijPlugin for App {
                 self.handle_command_result(exit_code, context)
             },
             Event::FailedToStartWebServer(error) => self.handle_web_server_error(error),
+            Event::PastedText(text) => self.handle_pasted_text(text),
             _ => false,
         }
     }
@@ -81,6 +88,7 @@ impl App {
             EventType::RunCommandResult,
             EventType::FailedToStartWebServer,
             EventType::Timer,
+            EventType::PastedText,
         ]);
     }
 
@@ -175,6 +183,13 @@ impl App {
     }
 
     fn handle_main_screen_keys(&mut self, key: KeyWithModifier) -> bool {
+        // When the inline relay-auth-token prompt is open, keystrokes are
+        // captured by the prompt — typing, backspace, Enter (submit),
+        // Esc (cancel). Other keys fall through.
+        if self.state.entering_relay_tunnel_auth_token.is_some() {
+            return self.handle_relay_token_prompt_key(key);
+        }
+
         match key.bare_key {
             BareKey::Enter if key.has_no_modifiers() && !self.web_server.started => {
                 start_web_server();
@@ -189,12 +204,19 @@ impl App {
                 false
             },
             BareKey::Char('i') if key.has_no_modifiers() => {
-                share_current_session_to_relay();
-                false
+                self.handle_share_to_relay_key();
+                true
             },
             BareKey::Char('I') if key.has_no_modifiers() => {
                 stop_sharing_current_session_from_relay();
                 false
+            },
+            BareKey::Char('A') if key.has_no_modifiers() => {
+                // Explicit rotate: open the prompt unconditionally so
+                // the operator can replace the configured token without
+                // waiting for the relay to reject.
+                self.open_relay_auth_token_prompt();
+                true
             },
             BareKey::Char('t') if key.has_no_modifiers() => {
                 self.handle_token_action();
@@ -203,6 +225,75 @@ impl App {
             BareKey::Esc if key.has_no_modifiers() => {
                 close_self();
                 false
+            },
+            _ => false,
+        }
+    }
+
+    /// `'i'` dispatch. If the current tunnel state is auth-rejected, the
+    /// user needs a new token; open the prompt immediately. Otherwise
+    /// attempt the share — if the relay rejects it, the
+    /// `__RELAY_FAILED__:…relay tunnel auth rejected` sentinel will come
+    /// back via `ModeInfo` and the main-screen render picks up the
+    /// rejection branch on the next update.
+    fn handle_share_to_relay_key(&mut self) {
+        if self.relay_auth_rejected() {
+            self.open_relay_auth_token_prompt();
+        } else {
+            share_current_session_to_relay();
+        }
+    }
+
+    fn relay_auth_rejected(&self) -> bool {
+        self.web_server
+            .remote_share_url
+            .as_deref()
+            .map(|s| {
+                s.starts_with("__RELAY_FAILED__:")
+                    && s[("__RELAY_FAILED__:".len())..].contains(AUTH_REJECTED_NEEDLE)
+            })
+            .unwrap_or(false)
+    }
+
+    fn open_relay_auth_token_prompt(&mut self) {
+        self.state.entering_relay_tunnel_auth_token = Some(String::new());
+    }
+
+    /// Keystroke dispatch while the inline relay-auth-token prompt is
+    /// active. Returns `true` whenever the plugin should re-render.
+    fn handle_relay_token_prompt_key(&mut self, key: KeyWithModifier) -> bool {
+        match key.bare_key {
+            BareKey::Char(c) if key.has_no_modifiers() => {
+                if let Some(buf) = self.state.entering_relay_tunnel_auth_token.as_mut() {
+                    buf.push(c);
+                }
+                true
+            },
+            BareKey::Backspace if key.has_no_modifiers() => {
+                if let Some(buf) = self.state.entering_relay_tunnel_auth_token.as_mut() {
+                    buf.pop();
+                }
+                true
+            },
+            BareKey::Enter if key.has_no_modifiers() => {
+                if let Some(token) = self.state.entering_relay_tunnel_auth_token.take() {
+                    let trimmed = token.trim().to_owned();
+                    if trimmed.is_empty() {
+                        // Empty submit is treated as a cancel but
+                        // surfaced as info so the user knows nothing
+                        // was persisted.
+                        self.state.info =
+                            Some("Relay tunnel auth token not changed.".to_owned());
+                    } else {
+                        set_relay_tunnel_auth_token(trimmed);
+                        share_current_session_to_relay();
+                    }
+                }
+                true
+            },
+            BareKey::Esc if key.has_no_modifiers() => {
+                self.state.entering_relay_tunnel_auth_token = None;
+                true
             },
             _ => false,
         }
@@ -385,6 +476,23 @@ impl App {
         true
     }
 
+    /// Bracketed-paste handler. When the relay-auth-token prompt is
+    /// open, the pasted string is appended to the input buffer verbatim
+    /// (newlines stripped — tokens are single-line). Outside the prompt
+    /// pastes are ignored.
+    fn handle_pasted_text(&mut self, text: String) -> bool {
+        if let Some(buf) = self.state.entering_relay_tunnel_auth_token.as_mut() {
+            for c in text.chars() {
+                if c == '\n' || c == '\r' {
+                    continue;
+                }
+                buf.push(c);
+            }
+            return true;
+        }
+        false
+    }
+
     fn query_link_executable(&self) {
         let mut xdg_context = BTreeMap::new();
         xdg_context.insert("xdg_open_cli".to_owned(), String::new());
@@ -455,6 +563,7 @@ impl App {
             &self.state.info,
             &self.ui.link_executable,
             &self.web_server.remote_share_url,
+            &self.state.entering_relay_tunnel_auth_token,
         )
         .render(rows, cols);
 
@@ -666,6 +775,10 @@ struct AppState {
     current_screen: Screen,
     previous_screen: Option<Screen>,
     info: Option<String>,
+    /// Phase 6 Session C: when `Some`, the main screen renders an inline
+    /// text-prompt instead of the normal public-URL row. Typing pushes
+    /// into the string, Enter submits + opens the tunnel, Esc aborts.
+    entering_relay_tunnel_auth_token: Option<String>,
 }
 
 #[derive(Debug, Clone)]

@@ -302,6 +302,14 @@ pub fn revoke_sessions_for_auth_token(auth_token: &str) -> Result<usize> {
 }
 
 pub fn revoke_token(name: &str) -> Result<bool> {
+    revoke_token_and_return_hash(name).map(|opt| opt.is_some())
+}
+
+/// Like `revoke_token` but returns the SHA-256 hash of the just-revoked
+/// auth token so callers can propagate the revocation (e.g. via the
+/// relay tunnel's `RevokeToken` control frame). Returns `Ok(None)` if
+/// no token with `name` existed.
+pub fn revoke_token_and_return_hash(name: &str) -> Result<Option<String>> {
     let mut conn = open_db()?;
 
     let tx = conn.transaction().map_err(TokenError::Database)?;
@@ -316,16 +324,20 @@ pub fn revoke_token(name: &str) -> Result<bool> {
         Err(e) => return Err(TokenError::Database(e)),
     };
 
-    if let Some(token_hash) = token_hash {
+    if let Some(token_hash) = &token_hash {
         tx.execute(
             "DELETE FROM session_tokens WHERE auth_token_hash = ?1",
-            [&token_hash],
+            [token_hash],
         )?;
     }
 
     let rows_affected = tx.execute("DELETE FROM tokens WHERE name = ?1", [&name])?;
     tx.commit().map_err(TokenError::Database)?;
-    Ok(rows_affected > 0)
+    if rows_affected > 0 {
+        Ok(token_hash)
+    } else {
+        Ok(None)
+    }
 }
 
 pub fn revoke_all_tokens() -> Result<usize> {

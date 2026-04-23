@@ -534,6 +534,11 @@ web_client {
 /// Default: false
 // 
 // encrypt_web_sharing false
+/// Shared-secret token required by the Zellij relay to
+/// authorise tunnel establishment. Mint one via
+/// `zellij-relay create-token --label <label>` on the relay host.
+// 
+// relay_tunnel_auth_token "<paste-token-here>"
  
 // Whether to stack panes when resizing beyond a certain size
 // Default: true

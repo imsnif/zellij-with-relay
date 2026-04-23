@@ -603,6 +603,7 @@ pub enum ServerContext {
     StopSharingCurrentSession,
     ShareCurrentSessionToRelay,
     StopSharingCurrentSessionFromRelay,
+    SetRelayTunnelAuthToken,
     RelayTunnelReady,
     WebServerStarted,
     FailedToStartWebServer,

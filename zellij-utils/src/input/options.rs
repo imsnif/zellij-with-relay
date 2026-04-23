@@ -286,6 +286,16 @@ pub struct Options {
     #[clap(long, value_parser)]
     #[serde(default)]
     pub encrypt_web_sharing: Option<bool>,
+    /// Shared-secret token required by the relay on tunnel establishment.
+    /// Mint one per sharer/machine via `zellij-relay create-token --label
+    /// <label>` on the relay host, then copy the plaintext output here.
+    /// When `None`, the tunnel send will be rejected at the relay auth
+    /// layer (surfaced in the share plugin as `<relay rejected auth
+    /// token>`). Stored in cleartext in the Zellij user config — treat
+    /// it like any other bearer credential.
+    #[clap(long, value_parser)]
+    #[serde(default)]
+    pub relay_tunnel_auth_token: Option<String>,
     /// A command to run after the discovery of running commands when serializing, for the purpose
     /// of manipulating the command (eg. with a regex) before it gets serialized
     #[clap(long, value_parser)]
@@ -404,6 +414,9 @@ impl Options {
         let encrypt_web_sharing = other
             .encrypt_web_sharing
             .or(self.encrypt_web_sharing);
+        let relay_tunnel_auth_token = other
+            .relay_tunnel_auth_token
+            .or_else(|| self.relay_tunnel_auth_token.clone());
         let post_command_discovery_hook = other
             .post_command_discovery_hook
             .or(self.post_command_discovery_hook.clone());
@@ -439,6 +452,7 @@ impl Options {
             serialize_pane_viewport,
             relay_server_url,
             encrypt_web_sharing,
+            relay_tunnel_auth_token,
             scrollback_lines_to_serialize,
             styled_underlines,
             serialization_interval,
@@ -545,6 +559,9 @@ impl Options {
             .relay_server_url
             .or_else(|| self.relay_server_url.clone());
         let encrypt_web_sharing = merge_bool(other.encrypt_web_sharing, self.encrypt_web_sharing);
+        let relay_tunnel_auth_token = other
+            .relay_tunnel_auth_token
+            .or_else(|| self.relay_tunnel_auth_token.clone());
         let post_command_discovery_hook = other
             .post_command_discovery_hook
             .or_else(|| self.post_command_discovery_hook.clone());
@@ -600,6 +617,7 @@ impl Options {
             enforce_https_for_localhost,
             relay_server_url,
             encrypt_web_sharing,
+            relay_tunnel_auth_token,
             post_command_discovery_hook,
             client_async_worker_tasks,
         }

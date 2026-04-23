@@ -48,6 +48,7 @@ pub async fn start_relay_tunnel(
     relay_url: String,
     session_name: String,
     zellij_version: String,
+    relay_tunnel_auth_token: String,
     connection_table: Arc<Mutex<ConnectionTable>>,
     os_api_factory: Arc<dyn ClientOsApiFactory>,
     session_manager: Arc<dyn SessionManager>,
@@ -62,6 +63,7 @@ pub async fn start_relay_tunnel(
         &relay_url,
         session_name.clone(),
         zellij_version.clone(),
+        relay_tunnel_auth_token.clone(),
         String::new(),
     )
     .await?;
@@ -76,7 +78,7 @@ pub async fn start_relay_tunnel(
     let state = Arc::new(RelayTunnelState {
         next_client_id: AtomicU32::new(1),
         clients: Mutex::new(Default::default()),
-        control_tunnel_tx,
+        control_tunnel_tx: control_tunnel_tx.clone(),
         terminal_tunnel_tx,
         tunnel_id: tunnel_id.clone(),
         pending_e2e_keys: Mutex::new(Default::default()),
@@ -95,6 +97,7 @@ pub async fn start_relay_tunnel(
     let status = Arc::new(Mutex::new(RelayTunnelStatus::Connected(public_url.clone())));
     let stop_requested = Arc::new(AtomicBool::new(false));
     let current_iteration_shutdown = Arc::new(Mutex::new(None));
+    let control_tx_slot = Arc::new(Mutex::new(Some(control_tunnel_tx)));
 
     let handle = RelayTunnelHandle {
         public_url: public_url.clone(),
@@ -104,6 +107,7 @@ pub async fn start_relay_tunnel(
         stop_requested: stop_requested.clone(),
         current_iteration_shutdown: current_iteration_shutdown.clone(),
         status: status.clone(),
+        control_tx: control_tx_slot.clone(),
     };
     registry().insert(client_id, handle).await;
 
@@ -117,10 +121,12 @@ pub async fn start_relay_tunnel(
         status,
         stop_requested,
         current_iteration_shutdown,
+        control_tx_slot,
         SupervisorArgs {
             relay_url,
             session_name,
             zellij_version,
+            relay_tunnel_auth_token,
             last_known_slug: slug,
             last_known_url: public_url.clone(),
             connection_table,
@@ -141,6 +147,7 @@ struct SupervisorArgs {
     relay_url: String,
     session_name: String,
     zellij_version: String,
+    relay_tunnel_auth_token: String,
     last_known_slug: String,
     last_known_url: String,
     connection_table: Arc<Mutex<ConnectionTable>>,
@@ -162,6 +169,7 @@ async fn run_supervisor(
     status: Arc<Mutex<RelayTunnelStatus>>,
     stop_requested: Arc<AtomicBool>,
     current_iteration_shutdown: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    control_tx_slot: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>>,
     mut args: SupervisorArgs,
 ) {
     // First run: we already have open sockets + a shutdown channel.
@@ -231,6 +239,7 @@ async fn run_supervisor(
             &args.relay_url,
             args.session_name.clone(),
             args.zellij_version.clone(),
+            args.relay_tunnel_auth_token.clone(),
             args.last_known_slug.clone(),
         )
         .await
@@ -278,6 +287,11 @@ async fn run_supervisor(
             tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         let (terminal_tunnel_tx, terminal_tunnel_rx) =
             tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+
+        // Refresh the shared control-tx slot so any outside caller (e.g. a
+        // `RevokeRelayToken` IPC) reaches the fresh tunnel rather than a
+        // closed channel from the previous iteration.
+        *control_tx_slot.lock().unwrap() = Some(control_tunnel_tx.clone());
 
         let state = Arc::new(RelayTunnelState {
             next_client_id: AtomicU32::new(1),
@@ -371,4 +385,32 @@ pub async fn get_relay_tunnel_status_sentinel(client_id: ClientId) -> String {
         })
         .await
         .unwrap_or_default()
+}
+
+/// Phase 6 Session C: broadcast a token revocation onto every active
+/// relay tunnel's control channel. The relay tears down any fan-out
+/// group or r/w client whose session is keyed on the given hash.
+/// Fire-and-forget: a closed control channel (tunnel between reconnect
+/// iterations, or already shut down) is silently skipped.
+pub async fn broadcast_revoke_token(token_hash: String) {
+    use zellij_relay_protocol::ControlMessage;
+    let frame = ControlMessage::RevokeToken {
+        token_hash: token_hash.clone(),
+    }
+    .encode();
+    let mut senders: Vec<tokio::sync::mpsc::UnboundedSender<Vec<u8>>> = Vec::new();
+    registry()
+        .for_each_handle(|handle| {
+            if let Some(tx) = handle.control_tx.lock().unwrap().clone() {
+                senders.push(tx);
+            }
+        })
+        .await;
+    for tx in senders {
+        let _ = tx.send(frame.clone());
+    }
+    log::debug!(
+        "relay: broadcast RevokeToken for token_hash={}",
+        &token_hash
+    );
 }
