@@ -5522,6 +5522,7 @@ dependencies = [
  "axum",
  "axum-extra",
  "futures-util",
+ "include_dir",
  "log",
  "prost",
  "rand 0.8.5",

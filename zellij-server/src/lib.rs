@@ -1956,23 +1956,38 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                                         instruction,
                                         10_000,
                                     );
-                                    let public_url = match result {
+                                    // `public_url` carries what the share
+                                    // plugin renders; `established` gates
+                                    // the status poll. On a handshake
+                                    // error there is no tunnel handle on
+                                    // the web-server side, so the error
+                                    // message is surfaced via the same
+                                    // `__RELAY_FAILED__:` sentinel the
+                                    // post-handshake status poll uses,
+                                    // but polling is not started.
+                                    let (public_url, established) = match result {
                                         Ok(WebServerResponse::RelayTunnelEstablished {
                                             public_url,
                                             ..
-                                        }) => Some(public_url),
+                                        }) => (Some(public_url), true),
                                         Ok(WebServerResponse::RelayTunnelError {
                                             message,
                                             ..
                                         }) => {
                                             log::error!("Relay tunnel error: {}", message);
-                                            None
+                                            (
+                                                Some(format!(
+                                                    "__RELAY_FAILED__:{}",
+                                                    message
+                                                )),
+                                                false,
+                                            )
                                         },
                                         Err(e) => {
                                             log::error!("Relay tunnel IPC error: {}", e);
-                                            None
+                                            (None, false)
                                         },
-                                        _ => None,
+                                        _ => (None, false),
                                     };
                                     let _ = to_server.send(
                                         ServerInstruction::RelayTunnelReady {
@@ -1989,7 +2004,7 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                                     // exits when the status reverts to
                                     // empty string (tunnel stopped) or
                                     // to a terminal Failed sentinel.
-                                    if public_url.is_some() {
+                                    if established {
                                         let path_poll = path_str.clone();
                                         let to_server_poll = to_server.clone();
                                         thread::spawn(move || {

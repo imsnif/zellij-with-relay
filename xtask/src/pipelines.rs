@@ -347,6 +347,14 @@ pub fn publish(sh: &Shell, flags: flags::Publish) -> anyhow::Result<()> {
         )
         .context(err_context)?;
 
+        // Snapshot the freshly-baked web-client assets (including the
+        // clip.wasm produced just above) into the versioned relay tree
+        // at `zellij-relay/assets/<version>/`. The git commit below
+        // captures this directory in the same release commit, so every
+        // tagged release leaves a frozen bundle behind for the relay to
+        // serve to older Zellij clients that attach later.
+        build::snapshot_web_assets_for_relay(sh, version).context(err_context)?;
+
         // Update default config
         sh.copy_file(
             project_dir

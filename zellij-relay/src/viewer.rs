@@ -27,6 +27,11 @@ use crate::router::AppState;
 
 const AUTH_CHALLENGE_TIMEOUT_SECS: u64 = 5;
 const SESSION_COOKIE: &str = "relay_session";
+/// Maximum simultaneous r/w viewers per tunnel. Read-only viewers share a
+/// single virtual watcher per token and are unaffected. Over-cap
+/// registrations fall through to `uniform_unauthorised()` so the browser
+/// cannot distinguish a cap hit from a token rejection.
+const MAX_RW_VIEWERS: usize = 10;
 
 #[derive(Deserialize, Default)]
 pub struct LoginRequest {
@@ -145,8 +150,38 @@ pub async fn version(
 }
 
 pub async fn serve_asset(
-    AxumPath((_slug, path)): AxumPath<(String, String)>,
+    AxumPath((slug, path)): AxumPath<(String, String)>,
+    State(state): State<AppState>,
 ) -> Response {
+    // Resolution order when the slug maps to an active tunnel:
+    //   1. tunnel.zellij_version matches RELAY_VERSION → embedded bundle.
+    //   2. tunnel.zellij_version has a committed on-disk snapshot → disk.
+    //   3. otherwise → 404 with upgrade hint.
+    // Unknown slugs fall through to the embedded bundle to preserve the
+    // enumeration-safety invariant (asset-only probes cannot distinguish
+    // live from unknown slugs).
+    if let Some(entry) = state.registry.get(&slug) {
+        if !crate::versioned_assets::has_version(&entry.zellij_version) {
+            let body = format!(
+                "Zellij version {} not supported by this relay. Please update Zellij.",
+                entry.zellij_version
+            );
+            return (
+                StatusCode::NOT_FOUND,
+                [(header::CONTENT_TYPE, "text/plain")],
+                body,
+            )
+                .into_response();
+        }
+        return match crate::versioned_assets::lookup(&entry.zellij_version, &path) {
+            None => (StatusCode::NOT_FOUND, "Not Found").into_response(),
+            Some(asset) => (
+                [(header::CONTENT_TYPE, asset.content_type)],
+                asset.contents,
+            )
+                .into_response(),
+        };
+    }
     match zellij_web_client_assets::lookup(&path) {
         None => (StatusCode::NOT_FOUND, "Not Found").into_response(),
         Some(asset) => (
@@ -373,6 +408,17 @@ async fn register_viewer(
     }
     if resp.is_read_only {
         return finalise_ro_first(entry, slug, &token_hash, resp.client_id, resp.e2e_encrypted);
+    }
+    // Enforce MAX_RW_VIEWERS. `client_id_to_viewer` is 1:1 for r/w, so
+    // its length is the live r/w count. Over-cap registrations return
+    // None and fall through to a uniform 401.
+    if entry.client_id_to_viewer.lock().unwrap().len() >= MAX_RW_VIEWERS {
+        tracing::info!(
+            slug = %slug,
+            cap = MAX_RW_VIEWERS,
+            "r/w viewer cap hit — rejecting registration"
+        );
+        return None;
     }
     if entry
         .control_tx
