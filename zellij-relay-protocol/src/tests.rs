@@ -10,6 +10,7 @@ fn control_auth_roundtrip() {
         session_name: "s".into(),
         protocol_version: PROTOCOL_VERSION,
         zellij_version: "z".into(),
+        requested_slug: "prev-slug".into(),
     };
     let bytes = original.encode();
     let decoded = decode_control_frame(&bytes).expect("decode ok");
@@ -19,11 +20,13 @@ fn control_auth_roundtrip() {
             session_name,
             protocol_version,
             zellij_version,
+            requested_slug,
         } => {
             assert_eq!(token, "t");
             assert_eq!(session_name, "s");
             assert_eq!(protocol_version, PROTOCOL_VERSION);
             assert_eq!(zellij_version, "z");
+            assert_eq!(requested_slug, "prev-slug");
         },
         other => panic!("expected Auth, got {:?}", other),
     }
@@ -128,6 +131,7 @@ fn control_frame_tolerates_unknown_trailing_bytes() {
         session_name: "sess".into(),
         protocol_version: PROTOCOL_VERSION,
         zellij_version: "0.45.0".into(),
+        requested_slug: String::new(),
     };
     let mut bytes = original.encode();
     bytes.extend_from_slice(&[0x78, 0x2a]);
@@ -138,6 +142,7 @@ fn control_frame_tolerates_unknown_trailing_bytes() {
             session_name,
             protocol_version,
             zellij_version,
+            requested_slug: _,
         } => {
             assert_eq!(token, "tok");
             assert_eq!(session_name, "sess");

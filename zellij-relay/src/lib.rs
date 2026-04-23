@@ -1,4 +1,5 @@
 pub mod config;
+pub mod heartbeat;
 pub mod registry;
 pub mod router;
 pub mod slug;

@@ -3,11 +3,11 @@ use crate::web_server_commands::{
     InstructionForWebServer as RustInstructionForWebServer, VersionInfo, WebServerResponse,
 };
 use crate::web_server_contract::web_server_contract::{
-    instruction_for_web_server, web_server_response,
+    instruction_for_web_server, web_server_response, GetRelayTunnelStatusMsg,
     InstructionForWebServer as ProtoInstructionForWebServer, QueryVersionMsg,
-    RelayTunnelErrorMsg, RelayTunnelEstablishedMsg, RelayTunnelStoppedMsg, ShutdownWebServerMsg,
-    StartRelayTunnelMsg, StopRelayTunnelMsg, VersionResponseMsg,
-    WebServerResponse as ProtoWebServerResponse,
+    RelayTunnelErrorMsg, RelayTunnelEstablishedMsg, RelayTunnelStatusReportMsg,
+    RelayTunnelStoppedMsg, ShutdownWebServerMsg, StartRelayTunnelMsg, StopRelayTunnelMsg,
+    VersionResponseMsg, WebServerResponse as ProtoWebServerResponse,
 };
 
 // Convert Rust InstructionForWebServer to protobuf
@@ -35,6 +35,13 @@ impl From<RustInstructionForWebServer> for ProtoInstructionForWebServer {
                 instruction_for_web_server::Instruction::StopRelayTunnel(StopRelayTunnelMsg {
                     client_id: client_id as u32,
                 })
+            },
+            RustInstructionForWebServer::GetRelayTunnelStatus { client_id } => {
+                instruction_for_web_server::Instruction::GetRelayTunnelStatus(
+                    GetRelayTunnelStatusMsg {
+                        client_id: client_id as u32,
+                    },
+                )
             },
         };
 
@@ -66,6 +73,11 @@ impl TryFrom<ProtoInstructionForWebServer> for RustInstructionForWebServer {
             },
             Some(instruction_for_web_server::Instruction::StopRelayTunnel(msg)) => {
                 Ok(RustInstructionForWebServer::StopRelayTunnel {
+                    client_id: msg.client_id as u16,
+                })
+            },
+            Some(instruction_for_web_server::Instruction::GetRelayTunnelStatus(msg)) => {
+                Ok(RustInstructionForWebServer::GetRelayTunnelStatus {
                     client_id: msg.client_id as u16,
                 })
             },
@@ -107,6 +119,15 @@ impl From<WebServerResponse> for ProtoWebServerResponse {
                     message,
                 })
             },
+            WebServerResponse::RelayTunnelStatusReport {
+                client_id,
+                status_url,
+            } => web_server_response::Response::RelayTunnelStatusReport(
+                RelayTunnelStatusReportMsg {
+                    client_id: client_id as u32,
+                    status_url,
+                },
+            ),
         };
 
         ProtoWebServerResponse {
@@ -145,6 +166,12 @@ impl TryFrom<ProtoWebServerResponse> for WebServerResponse {
                 Ok(WebServerResponse::RelayTunnelError {
                     client_id: msg.client_id as u16,
                     message: msg.message,
+                })
+            },
+            Some(web_server_response::Response::RelayTunnelStatusReport(msg)) => {
+                Ok(WebServerResponse::RelayTunnelStatusReport {
+                    client_id: msg.client_id as u16,
+                    status_url: msg.status_url,
                 })
             },
             None => Err(anyhow!("Missing response in WebServerResponse")),

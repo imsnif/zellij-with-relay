@@ -3,6 +3,9 @@ use crate::web_client::control_message::{
     SetConfigPayload, TerminalMetricsPayload, WebClientToWebServerControlMessage,
     WebClientToWebServerControlMessagePayload, WebServerToWebClientControlMessage,
 };
+use crate::web_client::local_heartbeat::{
+    now_millis, spawn_local_ws_heartbeat, HEARTBEAT_TIMEOUT_SECS,
+};
 use crate::web_client::message_handlers::{
     parse_stdin, render_to_client, send_control_messages_to_client, StdinSession,
 };
@@ -17,7 +20,10 @@ use axum::{
     response::IntoResponse,
 };
 use futures::StreamExt;
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc,
+};
 use tokio_util::sync::CancellationToken;
 use zellij_relay_protocol::crypto;
 use zellij_utils::{
@@ -64,6 +70,17 @@ async fn handle_ws_control(
         serde_json::to_string(&set_config_msg).unwrap().into(),
     ));
 
+    // Phase 6 (Session A): start the heartbeat watchdog. Pings are
+    // injected into `control_channel_tx` so they share the sink with
+    // regular control frames.
+    log::info!("[hb-local-control] wiring heartbeat for incoming /ws/control connection");
+    let last_activity = Arc::new(AtomicU64::new(now_millis()));
+    let (hb_handle, mut hb_tripped) = spawn_local_ws_heartbeat(
+        control_channel_tx.clone(),
+        last_activity.clone(),
+        "control",
+    );
+
     let send_message_to_server = |deserialized_msg: WebClientToWebServerControlMessage| {
         let Some(client_connection) = state
             .connection_table
@@ -89,8 +106,37 @@ async fn handle_ws_control(
 
     let mut set_client_control_channel = false;
 
-    while let Some(Ok(msg)) = control_socket_rx.next().await {
+    loop {
+        let msg = tokio::select! {
+            next = control_socket_rx.next() => match next {
+                Some(Ok(msg)) => msg,
+                _ => break,
+            },
+            _ = &mut hb_tripped => {
+                log::warn!(
+                    "local control ws silent >{}s — closing",
+                    HEARTBEAT_TIMEOUT_SECS
+                );
+                break;
+            }
+        };
+        last_activity.store(now_millis(), Ordering::Relaxed);
         match msg {
+            Message::Ping(payload) => {
+                log::info!(
+                    "[hb-local-control] inbound PING ({} bytes) — queueing PONG",
+                    payload.len()
+                );
+                let _ = control_channel_tx.send(Message::Pong(payload));
+                continue;
+            },
+            Message::Pong(payload) => {
+                log::info!(
+                    "[hb-local-control] inbound PONG ({} bytes) — last_activity refreshed",
+                    payload.len()
+                );
+                continue;
+            },
             Message::Text(msg) => {
                 let deserialized_msg: Result<WebClientToWebServerControlMessage, _> =
                     serde_json::from_str(&msg);
@@ -130,13 +176,14 @@ async fn handle_ws_control(
                 }
             },
             Message::Close(_) => {
-                return;
+                break;
             },
             _ => {
                 log::error!("Unsupported messagetype : {:?}", msg);
             },
         }
     }
+    hb_handle.abort();
 }
 
 async fn handle_ws_terminal(
@@ -207,12 +254,27 @@ async fn handle_ws_terminal(
         .unwrap()
         .get_should_not_reconnect_flag(&web_client_id)
         .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+
+    // Phase 6 (Session A): heartbeat pings routed into the render-side
+    // writer via a dedicated Ping channel; activity watchdog sits on
+    // the reader loop below.
+    log::info!("[hb-local-terminal] wiring heartbeat for incoming /ws/terminal connection");
+    let (terminal_ping_tx, terminal_ping_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Message>();
+    let terminal_last_activity = Arc::new(AtomicU64::new(now_millis()));
+    let (terminal_hb_handle, mut terminal_hb_tripped) = spawn_local_ws_heartbeat(
+        terminal_ping_tx.clone(),
+        terminal_last_activity.clone(),
+        "terminal",
+    );
+
     render_to_client(
         stdout_channel_rx,
         client_terminal_channel_tx,
         terminal_channel_cancellation_token.clone(),
         should_not_reconnect,
         e2e_key,
+        terminal_ping_rx,
     );
     state
         .connection_table
@@ -240,17 +302,33 @@ async fn handle_ws_terminal(
     let mut stdin_session = StdinSession::new(explicitly_disable_kitty_keyboard_protocol);
     let finalize_idle = std::time::Duration::from_millis(50);
     loop {
-        // When termwiz is holding ambiguous-but-complete events from
-        // the previous frame, race the next frame against an idle
-        // timeout so the held events still drain if no further frame
-        // arrives.
+        // Race the next frame against the heartbeat watchdog. When
+        // termwiz is holding ambiguous-but-complete events from the
+        // previous frame, also race against an idle timeout so the
+        // held events still drain if no further frame arrives.
         let result = if stdin_session.pending_finalize() {
             tokio::select! {
                 msg = client_terminal_channel_rx.next() => Some(msg),
                 _ = tokio::time::sleep(finalize_idle) => None,
+                _ = &mut terminal_hb_tripped => {
+                    log::warn!(
+                        "local terminal ws silent >{}s — closing",
+                        HEARTBEAT_TIMEOUT_SECS
+                    );
+                    break;
+                }
             }
         } else {
-            Some(client_terminal_channel_rx.next().await)
+            tokio::select! {
+                msg = client_terminal_channel_rx.next() => Some(msg),
+                _ = &mut terminal_hb_tripped => {
+                    log::warn!(
+                        "local terminal ws silent >{}s — closing",
+                        HEARTBEAT_TIMEOUT_SECS
+                    );
+                    break;
+                }
+            }
         };
         let msg = match result {
             Some(Some(Ok(m))) => m,
@@ -275,7 +353,23 @@ async fn handle_ws_terminal(
                 continue;
             },
         };
+        terminal_last_activity.store(now_millis(), Ordering::Relaxed);
         match msg {
+            Message::Ping(p) => {
+                log::info!(
+                    "[hb-local-terminal] inbound PING ({} bytes) — queueing PONG",
+                    p.len()
+                );
+                let _ = terminal_ping_tx.send(Message::Pong(p));
+                continue;
+            },
+            Message::Pong(p) => {
+                log::info!(
+                    "[hb-local-terminal] inbound PONG ({} bytes) — last_activity refreshed",
+                    p.len()
+                );
+                continue;
+            },
             Message::Binary(buf) => {
                 let Some(client_connection) = state
                     .connection_table
@@ -345,12 +439,9 @@ async fn handle_ws_terminal(
                     .remove_client(&web_client_id);
                 break;
             },
-            // TODO: support Message::Binary
-            _ => {
-                log::error!("Unsupported websocket msg type");
-            },
         }
     }
+    terminal_hb_handle.abort();
     os_input.send_to_server(ClientToServerMsg::ClientExited);
 }
 

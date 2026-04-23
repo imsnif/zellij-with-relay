@@ -12,6 +12,13 @@ pub struct TunnelAuth {
     pub protocol_version: u32,
     #[prost(string, tag="4")]
     pub zellij_version: ::prost::alloc::string::String,
+    /// Phase 6 reconnect support: when reconnecting after an unexpected
+    /// drop, the client supplies the previously-issued slug so the relay
+    /// can reuse it if still free. Empty string on a fresh handshake. The
+    /// relay falls back to a freshly-generated slug if the requested one
+    /// is already occupied.
+    #[prost(string, tag="5")]
+    pub requested_slug: ::prost::alloc::string::String,
 }
 /// Relay response to a successful TunnelAuth.
 #[allow(clippy::derive_partial_eq_without_eq)]

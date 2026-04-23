@@ -55,6 +55,15 @@ pub enum InstructionForWebServer {
     StopRelayTunnel {
         client_id: ClientId,
     },
+    /// Phase 6 (Session A): poll for the current relay-tunnel status.
+    /// The response is a `RelayTunnelStatusReport` whose `status_url`
+    /// carries either a live public URL or a sentinel-encoded state
+    /// (`__RELAY_RECONNECTING__:<attempt>` /
+    /// `__RELAY_FAILED__:<message>`), or the empty string if no tunnel
+    /// is registered for this `client_id`.
+    GetRelayTunnelStatus {
+        client_id: ClientId,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -79,6 +88,14 @@ pub enum WebServerResponse {
     RelayTunnelError {
         client_id: ClientId,
         message: String,
+    },
+    /// Phase 6 (Session A): reply to `GetRelayTunnelStatus`. `status_url`
+    /// is empty when no tunnel is registered, a live URL when connected,
+    /// or a sentinel (`__RELAY_RECONNECTING__:<attempt>` /
+    /// `__RELAY_FAILED__:<message>`) while the supervisor is retrying.
+    RelayTunnelStatusReport {
+        client_id: ClientId,
+        status_url: String,
     },
 }
 

@@ -55,6 +55,7 @@ async fn perform_control_handshake(
         session_name: "test-session".into(),
         protocol_version: PROTOCOL_VERSION,
         zellij_version: "0.45.0".into(),
+        requested_slug: String::new(),
     };
     ws_stream
         .send(Message::Binary(auth.encode()))

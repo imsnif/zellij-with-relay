@@ -140,6 +140,18 @@ pub async fn listen_to_web_server_instructions(
                         let response = WebServerResponse::RelayTunnelStopped { client_id };
                         let _ = send_webserver_response(&mut receiver, response).await;
                     },
+                    InstructionForWebServer::GetRelayTunnelStatus { client_id } => {
+                        let status_url =
+                            crate::web_client::relay::get_relay_tunnel_status_sentinel(
+                                client_id,
+                            )
+                            .await;
+                        let response = WebServerResponse::RelayTunnelStatusReport {
+                            client_id,
+                            status_url,
+                        };
+                        let _ = send_webserver_response(&mut receiver, response).await;
+                    },
                 },
                 Err(e) => {
                     log::error!("Failed to process web server instruction: {}", e);

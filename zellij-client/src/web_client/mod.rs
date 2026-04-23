@@ -5,6 +5,7 @@ mod connection_manager;
 mod host_query_seed;
 mod http_handlers;
 mod ipc_listener;
+mod local_heartbeat;
 mod message_handlers;
 mod relay;
 mod server_listener;

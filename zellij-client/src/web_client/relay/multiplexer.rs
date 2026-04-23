@@ -8,13 +8,41 @@
 //! standard web client — so the existing rendering pipeline and input path
 //! flow through without modification.
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::ws::Message as WsMessage;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+
+/// Interval between tunnel keepalive pings (Zellij side). Chosen to match
+/// the relay server's matching ping cadence and the nginx
+/// `proxy_read_timeout` in `deploy/nginx/nginx.conf.template`.
+pub const RELAY_HEARTBEAT_INTERVAL_SECS: u64 = 30;
+/// Absolute silence budget. Two missed 30s pings produces roughly this
+/// much silence; a tunnel quiet for longer is considered dead and the
+/// reader/writer stack is torn down so the supervisor can reconnect.
+pub const RELAY_HEARTBEAT_TIMEOUT_SECS: u64 = 60;
+
+/// Outcome returned by `run_multiplexer`, consumed by the supervisor in
+/// `relay/mod.rs::run_relay_tunnel_supervisor` to decide whether to
+/// reconnect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MultiplexerExitReason {
+    /// Explicit shutdown requested (user pressed `I`, process exit, …).
+    Shutdown,
+    /// Tunnel dropped unexpectedly — reader error, heartbeat timeout, etc.
+    TunnelDropped,
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 pub fn relay_virtual_web_client_id(client_id: u32) -> String {
     format!("relay-client-{}", client_id)
 }
@@ -46,7 +74,7 @@ pub async fn run_multiplexer(
     control_tunnel_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     terminal_tunnel_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     shutdown_rx: oneshot::Receiver<()>,
-) {
+) -> MultiplexerExitReason {
     let ControlTunnelSession {
         sink: control_sink,
         stream: control_stream,
@@ -57,27 +85,72 @@ pub async fn run_multiplexer(
         stream: terminal_stream,
     } = terminal;
 
+    // Heartbeat bookkeeping: every received frame refreshes
+    // `last_activity_at`; a watchdog task trips if that timestamp ages
+    // past the configured silence budget.
+    let control_last_activity = Arc::new(AtomicU64::new(now_millis()));
+    let terminal_last_activity = Arc::new(AtomicU64::new(now_millis()));
+
+    let (control_ping_tx, control_ping_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (terminal_ping_tx, terminal_ping_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+
     // Writer tasks: drain the mpsc queues onto the socket sinks.
-    let control_writer = spawn_writer(control_sink, control_tunnel_rx);
-    let terminal_writer = spawn_writer(terminal_sink, terminal_tunnel_rx);
+    let control_writer = spawn_writer(control_sink, control_tunnel_rx, control_ping_rx);
+    let terminal_writer = spawn_writer(terminal_sink, terminal_tunnel_rx, terminal_ping_rx);
 
-    // Reader tasks: dispatch incoming frames.
-    let control_reader = spawn_control_reader(state.clone(), control_stream);
-    let terminal_reader = spawn_terminal_reader(state.clone(), terminal_stream);
+    // Reader tasks: dispatch incoming frames and refresh activity marks.
+    let control_reader =
+        spawn_control_reader(state.clone(), control_stream, control_last_activity.clone());
+    let terminal_reader = spawn_terminal_reader(
+        state.clone(),
+        terminal_stream,
+        terminal_last_activity.clone(),
+    );
 
-    tokio::select! {
+    // Heartbeat tasks: periodic Ping emission + silence watchdog.
+    let (control_hb_handle, control_hb_tripped) = spawn_heartbeat(
+        control_ping_tx,
+        control_last_activity,
+        "control",
+    );
+    let (terminal_hb_handle, terminal_hb_tripped) = spawn_heartbeat(
+        terminal_ping_tx,
+        terminal_last_activity,
+        "terminal",
+    );
+
+    let exit_reason = tokio::select! {
         _ = shutdown_rx => {
             log::info!("Relay tunnel shutdown signal received");
+            MultiplexerExitReason::Shutdown
         }
         _ = control_reader => {
             log::warn!("Relay control socket closed");
+            MultiplexerExitReason::TunnelDropped
         }
         _ = terminal_reader => {
             log::warn!("Relay terminal socket closed");
+            MultiplexerExitReason::TunnelDropped
         }
-    }
+        _ = control_hb_tripped => {
+            log::warn!(
+                "Relay control tunnel silent >{}s — tripping watchdog",
+                RELAY_HEARTBEAT_TIMEOUT_SECS
+            );
+            MultiplexerExitReason::TunnelDropped
+        }
+        _ = terminal_hb_tripped => {
+            log::warn!(
+                "Relay terminal tunnel silent >{}s — tripping watchdog",
+                RELAY_HEARTBEAT_TIMEOUT_SECS
+            );
+            MultiplexerExitReason::TunnelDropped
+        }
+    };
 
-    // Tear down all virtual clients.
+    // Tear down all virtual clients. On reconnect the relay will
+    // re-challenge each viewer through a fresh handshake, so draining
+    // virtual clients across the break is correct.
     let clients: Vec<RelayVirtualClient> = {
         let mut guard = state.clients.lock().unwrap();
         guard.drain().map(|(_id, c)| c).collect()
@@ -95,11 +168,64 @@ pub async fn run_multiplexer(
 
     control_writer.abort();
     terminal_writer.abort();
+    control_hb_handle.abort();
+    terminal_hb_handle.abort();
+    exit_reason
+}
+
+/// Spawn a keepalive + watchdog task: emit a ping every
+/// `RELAY_HEARTBEAT_INTERVAL_SECS` and trip the returned oneshot if no
+/// activity has been recorded on this tunnel for longer than
+/// `RELAY_HEARTBEAT_TIMEOUT_SECS`.
+fn spawn_heartbeat(
+    ping_tx: mpsc::UnboundedSender<Vec<u8>>,
+    last_activity: Arc<AtomicU64>,
+    which: &'static str,
+) -> (tokio::task::JoinHandle<()>, oneshot::Receiver<()>) {
+    let (tripped_tx, tripped_rx) = oneshot::channel::<()>();
+    let handle = tokio::spawn(async move {
+        // Wake every half-interval so the watchdog reacts quickly while
+        // pings still fire on the full cadence.
+        let mut ticker = tokio::time::interval(Duration::from_secs(
+            RELAY_HEARTBEAT_INTERVAL_SECS / 2,
+        ));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // First tick is immediate; skip it so we don't ping the moment we
+        // connect.
+        ticker.tick().await;
+        let mut ticks_since_ping: u32 = 0;
+        loop {
+            ticker.tick().await;
+            ticks_since_ping += 1;
+            if u64::from(ticks_since_ping) * (RELAY_HEARTBEAT_INTERVAL_SECS / 2)
+                >= RELAY_HEARTBEAT_INTERVAL_SECS
+            {
+                if ping_tx.send(b"hb".to_vec()).is_err() {
+                    // Writer task gone — tunnel is already tearing down.
+                    break;
+                }
+                ticks_since_ping = 0;
+            }
+            let last = last_activity.load(Ordering::Relaxed);
+            let now = now_millis();
+            if now.saturating_sub(last) > RELAY_HEARTBEAT_TIMEOUT_SECS * 1000 {
+                log::warn!(
+                    "relay {} tunnel: last activity {}ms ago — tripping watchdog",
+                    which,
+                    now.saturating_sub(last)
+                );
+                let _ = tripped_tx.send(());
+                break;
+            }
+        }
+    });
+    (handle, tripped_rx)
 }
 
 fn spawn_writer<S>(
     mut sink: S,
     mut rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    mut ping_rx: mpsc::UnboundedReceiver<Vec<u8>>,
 ) -> tokio::task::JoinHandle<()>
 where
     S: SinkExt<TungsteniteMessage, Error = tokio_tungstenite::tungstenite::Error>
@@ -108,9 +234,32 @@ where
         + 'static,
 {
     tokio::spawn(async move {
-        while let Some(bytes) = rx.recv().await {
-            if sink.send(TungsteniteMessage::Binary(bytes)).await.is_err() {
-                break;
+        loop {
+            tokio::select! {
+                frame = rx.recv() => match frame {
+                    Some(bytes) => {
+                        if sink
+                            .send(TungsteniteMessage::Binary(bytes))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    None => break,
+                },
+                ping = ping_rx.recv() => match ping {
+                    Some(payload) => {
+                        if sink
+                            .send(TungsteniteMessage::Ping(payload))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    None => break,
+                },
             }
         }
         let _ = sink.send(TungsteniteMessage::Close(None)).await;
@@ -120,6 +269,7 @@ where
 fn spawn_control_reader<S>(
     state: Arc<RelayTunnelState>,
     mut stream: S,
+    last_activity: Arc<AtomicU64>,
 ) -> tokio::task::JoinHandle<()>
 where
     S: futures_util::Stream<Item = Result<TungsteniteMessage, tokio_tungstenite::tungstenite::Error>>
@@ -129,6 +279,9 @@ where
 {
     tokio::spawn(async move {
         while let Some(frame) = stream.next().await {
+            // Any successful frame — binary, text, ping, pong — counts as
+            // activity; refresh the watchdog clock before dispatch.
+            last_activity.store(now_millis(), Ordering::Relaxed);
             let bytes = match frame {
                 Ok(TungsteniteMessage::Binary(b)) => b,
                 Ok(TungsteniteMessage::Text(t)) => t.into_bytes(),
@@ -205,6 +358,7 @@ where
 fn spawn_terminal_reader<S>(
     state: Arc<RelayTunnelState>,
     mut stream: S,
+    last_activity: Arc<AtomicU64>,
 ) -> tokio::task::JoinHandle<()>
 where
     S: futures_util::Stream<Item = Result<TungsteniteMessage, tokio_tungstenite::tungstenite::Error>>
@@ -214,6 +368,7 @@ where
 {
     tokio::spawn(async move {
         while let Some(frame) = stream.next().await {
+            last_activity.store(now_millis(), Ordering::Relaxed);
             let bytes = match frame {
                 Ok(TungsteniteMessage::Binary(b)) => b,
                 Ok(TungsteniteMessage::Text(t)) => t.into_bytes(),

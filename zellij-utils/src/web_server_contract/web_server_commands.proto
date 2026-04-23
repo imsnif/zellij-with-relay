@@ -7,6 +7,7 @@ message InstructionForWebServer {
     QueryVersionMsg query_version = 2;
     StartRelayTunnelMsg start_relay_tunnel = 3;
     StopRelayTunnelMsg stop_relay_tunnel = 4;
+    GetRelayTunnelStatusMsg get_relay_tunnel_status = 5;
   }
 }
 
@@ -27,12 +28,20 @@ message StopRelayTunnelMsg {
   uint32 client_id = 1;
 }
 
+// Phase 6 (Session A): poll the relay tunnel's current status. Returns
+// `RelayTunnelStatusReport` with a sentinel-encoded `status_url` that the
+// share plugin decodes for connected / reconnecting / failed rendering.
+message GetRelayTunnelStatusMsg {
+  uint32 client_id = 1;
+}
+
 message WebServerResponse {
   oneof response {
     VersionResponseMsg version = 1;
     RelayTunnelEstablishedMsg relay_tunnel_established = 2;
     RelayTunnelStoppedMsg relay_tunnel_stopped = 3;
     RelayTunnelErrorMsg relay_tunnel_error = 4;
+    RelayTunnelStatusReportMsg relay_tunnel_status_report = 5;
   }
 }
 
@@ -56,4 +65,13 @@ message RelayTunnelStoppedMsg {
 message RelayTunnelErrorMsg {
   uint32 client_id = 1;
   string message = 2;
+}
+
+// Phase 6 (Session A): result of `GetRelayTunnelStatusMsg`. `status_url`
+// is either a live public URL, `__RELAY_RECONNECTING__:<attempt>`, or
+// `__RELAY_FAILED__:<message>`. Empty string when no tunnel exists for
+// this client.
+message RelayTunnelStatusReportMsg {
+  uint32 client_id = 1;
+  string status_url = 2;
 }

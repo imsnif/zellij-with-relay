@@ -223,7 +223,41 @@ impl<'a> MainScreen<'a> {
     }
 
     fn render_remote_share_url(&self, layout: &Layout, y: usize) -> usize {
+        // Phase 6 (Session A): `remote_share_url` is either a live URL,
+        // `__RELAY_RECONNECTING__:<attempt>` while the supervisor is
+        // retrying, or `__RELAY_FAILED__:<message>` on permanent failure.
+        // Decode the sentinel prefixes and render state-specific copy.
+        const RECONNECTING: &str = "__RELAY_RECONNECTING__:";
+        const FAILED: &str = "__RELAY_FAILED__:";
         match self.remote_share_url {
+            Some(url) if url.starts_with(RECONNECTING) => {
+                let attempt = &url[RECONNECTING.len()..];
+                let label = format!(
+                    "Public URL: <reconnecting… attempt {}> (<I> - Cancel)",
+                    attempt
+                );
+                let stop_hint_start = label.len() - "(<I> - Cancel)".len();
+                let text = Text::new(&label)
+                    .color_range(2, ..10)
+                    .color_range(1, 12..stop_hint_start)
+                    .color_range(3, stop_hint_start..);
+                print_text_with_coordinates(text, layout.base_x, y, None, None);
+                y + 2
+            },
+            Some(url) if url.starts_with(FAILED) => {
+                let message = &url[FAILED.len()..];
+                let label = format!(
+                    "Public URL: <relay unreachable: {}> (<i> - Retry)",
+                    message
+                );
+                let retry_hint_start = label.len() - "(<i> - Retry)".len();
+                let text = Text::new(&label)
+                    .color_range(2, ..10)
+                    .color_range(1, 12..retry_hint_start)
+                    .color_range(3, retry_hint_start..);
+                print_text_with_coordinates(text, layout.base_x, y, None, None);
+                y + 2
+            },
             Some(url) => {
                 let label = format!("Public URL: {} (<I> - Stop Public Sharing)", url);
                 let stop_hint_start = label.len() - "(<I> - Stop Public Sharing)".len();
