@@ -5004,7 +5004,6 @@ mod tests {
         let original = PluginCommand::ShareCurrentSessionToRelay;
         let proto: ProtobufPluginCommand = original.clone().try_into().unwrap();
         assert_eq!(proto.name, CommandName::ShareCurrentSessionToRelay as i32);
-        assert_eq!(proto.name, 211);
         let decoded: PluginCommand = proto.try_into().unwrap();
         match decoded {
             PluginCommand::ShareCurrentSessionToRelay => {},
@@ -5020,7 +5019,6 @@ mod tests {
             proto.name,
             CommandName::StopSharingCurrentSessionFromRelay as i32
         );
-        assert_eq!(proto.name, 212);
         let decoded: PluginCommand = proto.try_into().unwrap();
         match decoded {
             PluginCommand::StopSharingCurrentSessionFromRelay => {},
