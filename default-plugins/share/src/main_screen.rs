@@ -8,6 +8,8 @@ use zellij_tile::prelude::*;
 use std::collections::HashMap;
 use url::Url;
 
+const PUBLIC_URL_PREFIX: &str = "Public URL: ";
+
 pub struct MainScreenState {
     pub currently_hovering_over_link: bool,
     pub currently_hovering_over_unencrypted: bool,
@@ -170,7 +172,7 @@ impl<'a> MainScreen<'a> {
 
         current_y = self.render_web_server_section(layout, current_y, state);
         current_y = self.render_current_session_section(layout, current_y, state);
-        current_y = self.render_remote_share_url(layout, current_y);
+        current_y = self.render_remote_share_url(layout, current_y, state);
         current_y = self.render_usage_section(layout, current_y);
         current_y = self.render_warnings_and_help(layout, current_y, state);
 
@@ -244,7 +246,12 @@ impl<'a> MainScreen<'a> {
         y + layout.web_server_height + 1
     }
 
-    fn render_remote_share_url(&self, layout: &Layout, y: usize) -> usize {
+    fn render_remote_share_url(
+        &self,
+        layout: &Layout,
+        y: usize,
+        state: &mut MainScreenState,
+    ) -> usize {
         // If the operator is mid-way through entering a relay tunnel
         // auth token, swap the public-URL row for the inline prompt.
         // Everything else keeps the same geometry so the rest of the
@@ -335,12 +342,25 @@ impl<'a> MainScreen<'a> {
                 y + 2
             },
             Some(url) => {
-                let label = format!("Public URL: {} (<I> - Stop, <A> - Rotate Token)", url);
+                let label = format!("{}{} (<I> - Stop, <A> - Rotate Token)", PUBLIC_URL_PREFIX, url);
                 let hint_start = label.len() - "(<I> - Stop, <A> - Rotate Token)".len();
                 let text = Text::new(&label)
                     .color_range(2, ..10)
                     .color_range(3, hint_start..);
                 print_text_with_coordinates(text, layout.base_x, y, None, None);
+
+                let url_x = layout.base_x + PUBLIC_URL_PREFIX.chars().count();
+                let url_y = y;
+                let url_width = url.chars().count();
+                state.clickable_urls.insert(
+                    CoordinatesInLine::new(url_x, url_y, url_width),
+                    url.clone(),
+                );
+                if hovering_on_line(url_x, url_y, url_width, self.hover_coordinates) {
+                    state.currently_hovering_over_link = true;
+                    render_text_with_underline(url_x, url_y, url);
+                }
+
                 y + 2
             },
             None => {
