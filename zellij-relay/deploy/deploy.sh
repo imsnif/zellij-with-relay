@@ -9,17 +9,21 @@
 #     ./deploy.sh [COMMAND] [FLAGS]
 #
 # Commands (default: deploy):
-#     deploy    build images, obtain cert if missing, start the stack, health check
-#     logs      tail compose logs (optionally for one service)
-#     ps        compose status
-#     restart   restart the stack
-#     destroy   compose down -v (prompts; deletes the cert volume)
+#     deploy         build images, obtain cert if missing, start the stack, health check
+#     logs           tail compose logs (optionally for one service)
+#     ps             compose status
+#     restart        restart the stack
+#     destroy        compose down -v (prompts; deletes the cert volume)
+#     create-token   mint a relay tunnel auth token (optional positional label or --label)
+#     list-tokens    list relay tunnel auth tokens stored on the relay
+#     revoke-token   revoke a relay tunnel auth token by label or raw token
 #
 # Flags:
-#     --vps-ip     <ipv4>    public IPv4 of the VPS                 (required for deploy/destroy)
-#     --vps-user   <user>    SSH user on the VPS (e.g. debian)      (required for deploy/destroy)
-#     --le-email   <email>   contact email for LetsEncrypt          (required for deploy)
-#     --service    <name>    restrict `logs` to one compose service (optional)
+#     --vps-ip     <ipv4>    public IPv4 of the VPS                       (required for all host-bound commands)
+#     --vps-user   <user>    SSH user on the VPS (e.g. debian)            (required for all host-bound commands)
+#     --le-email   <email>   contact email for LetsEncrypt                (required for deploy)
+#     --service    <name>    restrict `logs` to one compose service       (optional)
+#     --label      <name>    label for create-token / revoke-token        (optional for create-token; required for revoke-token unless given positionally)
 #     -h, --help             show this help
 #
 # Example:
@@ -27,6 +31,10 @@
 #         --vps-ip    203.0.113.42 \
 #         --vps-user  debian \
 #         --le-email  you@example.com
+#
+#     ./deploy.sh create-token my-laptop --vps-ip 203.0.113.42 --vps-user debian
+#     ./deploy.sh list-tokens             --vps-ip 203.0.113.42 --vps-user debian
+#     ./deploy.sh revoke-token my-laptop  --vps-ip 203.0.113.42 --vps-user debian
 #
 # The public hostname is derived automatically from --vps-ip via sslip.io:
 #     203.0.113.42 -> 203-0-113-42.sslip.io
@@ -47,10 +55,11 @@ VPS_IP=""
 VPS_USER=""
 LE_EMAIL=""
 LOG_SERVICE=""
+TOKEN_LABEL=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        deploy|logs|ps|restart|destroy)
+        deploy|logs|ps|restart|destroy|create-token|list-tokens|revoke-token)
             [ -z "$CMD" ] || { echo "error: multiple commands given: $CMD, $1" >&2; exit 2; }
             CMD="$1"; shift ;;
         --vps-ip)       VPS_IP="${2:-}";      shift 2 ;;
@@ -61,8 +70,18 @@ while [ $# -gt 0 ]; do
         --le-email=*)   LE_EMAIL="${1#*=}";   shift ;;
         --service)      LOG_SERVICE="${2:-}"; shift 2 ;;
         --service=*)    LOG_SERVICE="${1#*=}"; shift ;;
+        --label)        TOKEN_LABEL="${2:-}"; shift 2 ;;
+        --label=*)      TOKEN_LABEL="${1#*=}"; shift ;;
         -h|--help)      usage 0 ;;
-        *)              echo "error: unknown argument: $1" >&2; usage 2 ;;
+        *)
+            # Allow a single positional argument after token subcommands as a
+            # convenience: `./deploy.sh create-token my-laptop` ≡ `--label my-laptop`.
+            if [ -z "$TOKEN_LABEL" ] && { [ "$CMD" = "create-token" ] || [ "$CMD" = "revoke-token" ]; }; then
+                TOKEN_LABEL="$1"; shift
+            else
+                echo "error: unknown argument: $1" >&2; usage 2
+            fi
+            ;;
     esac
 done
 
@@ -121,14 +140,14 @@ do_deploy() {
 
     ensure_docker
 
-    echo "[deploy] building images on VPS (first build downloads crates and compiles from source; this can take a few minutes)..."
-    docker compose build
+    echo "[deploy] building images on VPS (--no-cache; full rebuild every run)..."
+    docker compose build --no-cache
 
     echo "[deploy] ensuring TLS cert..."
     LE_EMAIL="$LE_EMAIL" PUBLIC_HOST="$PUBLIC_HOST" ./bootstrap-cert.sh
 
     echo "[deploy] starting stack..."
-    docker compose up -d
+    docker compose up -d --force-recreate
 
     echo "[deploy] waiting for https://${PUBLIC_HOST}/health ..."
     for i in $(seq 1 30); do
@@ -191,6 +210,26 @@ case "$CMD" in
         read -r ans
         [ "${ans}" = "YES" ] || { echo "[deploy] aborted"; exit 1; }
         docker compose down -v
+        ;;
+    create-token)
+        need_host_flags
+        # `docker compose exec` bypasses the image ENTRYPOINT, so the binary
+        # path is supplied explicitly. Token DB lives on the `relay-data`
+        # named volume mounted at /var/lib/zellij-relay.
+        if [ -n "$TOKEN_LABEL" ]; then
+            docker compose exec relay zellij-relay create-token "$TOKEN_LABEL"
+        else
+            docker compose exec relay zellij-relay create-token
+        fi
+        ;;
+    list-tokens)
+        need_host_flags
+        docker compose exec relay zellij-relay list-tokens
+        ;;
+    revoke-token)
+        need_host_flags
+        [ -n "$TOKEN_LABEL" ] || { echo "error: 'revoke-token' requires a label or token (positional or --label)" >&2; exit 2; }
+        docker compose exec relay zellij-relay revoke-token "$TOKEN_LABEL"
         ;;
     *)
         usage 2
