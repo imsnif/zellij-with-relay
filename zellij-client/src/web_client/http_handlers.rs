@@ -50,6 +50,7 @@ pub async fn serve_html(State(state): State<AppState>, request: Request) -> Html
             .replace("IS_READ_ONLY", "false")
             .replace("SESSION_ROWS", "0")
             .replace("SESSION_COLS", "0")
+            .replace("AUTH_MODE", "local")
             .replace("BASE_URL", &base_url),
     );
     html

@@ -40,18 +40,29 @@ function readExpectedE2e() {
 }
 
 /**
+ * Read the server-asserted auth-flow profile from the
+ * `zellij-auth-mode` hidden input. Returns "relay" or "local";
+ * defaults to "local" when the value is missing or unrecognised.
+ */
+function getAuthMode() {
+    const el = document.getElementById("zellij-auth-mode");
+    const v = el && el.value;
+    return v === "relay" ? "relay" : "local";
+}
+
+/**
  * Wait for user to provide a security token
  * @returns {Promise<{token: string, remember: boolean}>}
  */
 async function waitForSecurityToken() {
     let token = null;
-    let remember = null;
+    let remember = false;
 
     while (!token) {
         let result = await getSecurityToken();
         if (result) {
             token = result.token;
-            remember = result.remember;
+            remember = !!result.remember;
         } else {
             await showErrorModal(
                 "Error",
@@ -64,9 +75,60 @@ async function waitForSecurityToken() {
 }
 
 /**
+ * Try to silently fetch a saved credential via the Credential
+ * Management API. Returns the token string on success, `null` on
+ * unsupported browsers (Safari / Firefox) or when no credential is
+ * saved. With `mediation: 'optional'` Chromium / Edge / Brave / Opera
+ * may show a credential picker; an empty result means the user
+ * dismissed it or no credential matched.
+ */
+async function tryGetSavedCredential() {
+    if (typeof PasswordCredential === "undefined" ||
+        !navigator.credentials ||
+        !navigator.credentials.get) {
+        return null;
+    }
+    try {
+        const cred = await navigator.credentials.get({
+            password: true,
+            mediation: "optional",
+        });
+        if (cred && cred.type === "password" && cred.password) {
+            return cred.password;
+        }
+    } catch (_) {
+        // Some browsers throw on unrecognised options; fall through.
+    }
+    return null;
+}
+
+/**
+ * Persist a successful credential in the browser's password manager.
+ * On Chromium this is the imperative path; on Safari / Firefox the
+ * form-submit heuristic in `getSecurityToken` produces the same
+ * "Save password?" prompt, so this is a no-op there.
+ */
+async function saveCredential(token) {
+    if (typeof PasswordCredential === "undefined" ||
+        !navigator.credentials ||
+        !navigator.credentials.store) {
+        return;
+    }
+    try {
+        const cred = new PasswordCredential({
+            id: getCredentialId(),
+            password: token,
+        });
+        await navigator.credentials.store(cred);
+    } catch (_) {
+        // Best-effort: failures are silent.
+    }
+}
+
+/**
  * Get client ID from server after authentication
  * @param {string} token - Authentication token
- * @param {boolean} rememberMe - Remember login preference
+ * @param {boolean} rememberMe - Local-mode Remember-me preference; ignored in relay mode
  * @param {boolean} hasAuthenticationCookie - Whether auth cookie exists
  * @returns {Promise<{webClientId: string, e2e: ?{key: CryptoKey}} | null>} null on failure
  */
@@ -74,15 +136,20 @@ export async function getClientId(token, rememberMe, hasAuthenticationCookie, ex
     const baseUrl = getBaseUrl();
 
     if (!hasAuthenticationCookie) {
+        // In relay mode `remember_me` has no server-side effect (no
+        // persistent cookie path) and the field is not part of the relay
+        // login contract, so it is omitted entirely. In local mode the
+        // flag is forwarded so the standalone web-client can issue a
+        // persistent cookie when requested.
+        const loginBody = getAuthMode() === "local"
+            ? { auth_token: token, remember_me: !!rememberMe }
+            : { auth_token: token };
         let login_res = await fetch(`${baseUrl}/command/login`, {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
             },
-            body: JSON.stringify({
-                auth_token: token,
-                remember_me: rememberMe ? true : false,
-            }),
+            body: JSON.stringify(loginBody),
             credentials: "include",
         });
 
@@ -165,14 +232,35 @@ export async function getClientId(token, rememberMe, hasAuthenticationCookie, ex
  */
 export async function initAuthentication() {
     let token = null;
-    let remember = null;
+    let remember = false;
     let hasAuthenticationCookie = document.body.dataset.authenticated === "true";
     const expectedE2e = readExpectedE2e();
+    // Gates the imperative `navigator.credentials.store` call so the
+    // password manager is only asked to save tokens that came from a
+    // real user gesture, not from a silent autofill.
+    let tokenFromUserEntry = false;
 
     if (!hasAuthenticationCookie) {
-        const tokenResult = await waitForSecurityToken();
-        token = tokenResult.token;
-        remember = tokenResult.remember;
+        // Silent autofill via the Credential Management API is only
+        // used in relay mode, where the password manager is the
+        // primary persistence layer. In local mode the canonical
+        // persistence layer is the server-side Remember-me cookie,
+        // which depends on the user interacting with the checkbox;
+        // skipping the modal here would silently downgrade that
+        // decision on every return visit. The form's `autocomplete`
+        // attributes still let the password manager autofill the
+        // modal once it is visible.
+        const saved = getAuthMode() === "relay"
+            ? await tryGetSavedCredential()
+            : null;
+        if (saved) {
+            token = saved;
+        } else {
+            const tokenResult = await waitForSecurityToken();
+            token = tokenResult.token;
+            remember = tokenResult.remember;
+            tokenFromUserEntry = true;
+        }
     }
 
     let session;
@@ -185,11 +273,20 @@ export async function initAuthentication() {
             expectedE2e,
         );
         if (!session) {
+            // Login rejected (revoked / wrong token) — drop any cookie
+            // assumption and prompt the user manually. The modal's
+            // form-submit then lets the password manager offer to
+            // update the saved credential.
             hasAuthenticationCookie = false;
             const tokenResult = await waitForSecurityToken();
             token = tokenResult.token;
             remember = tokenResult.remember;
+            tokenFromUserEntry = true;
         }
+    }
+
+    if (token && tokenFromUserEntry) {
+        await saveCredential(token);
     }
 
     return session;
