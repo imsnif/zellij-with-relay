@@ -8,10 +8,13 @@ services:
     environment:
       RELAY_BIND_ADDR: "0.0.0.0:8765"
       RELAY_PUBLIC_URL_TEMPLATE: "https://${PUBLIC_HOST:?set PUBLIC_HOST}/r/{slug}"
+      RELAY_DATA_DIR: "/var/lib/zellij-relay"
       RUST_LOG: "info"
     restart: unless-stopped
     expose:
       - "8765"
+    volumes:
+      - relay-data:/var/lib/zellij-relay
 
   nginx:
     build:
@@ -52,3 +55,4 @@ services:
 volumes:
   letsencrypt:
   certbot-webroot:
+  relay-data:

@@ -97,15 +97,20 @@ configure the sharer's Zellij to send it.
 ### Manage tokens on the relay host
 
 Tokens live in `$RELAY_DATA_DIR/relay_tunnel_auth_tokens.db`
-(`/var/lib/zellij-relay/relay_tunnel_auth_tokens.db` by default). The
-`zellij-relay` binary exposes subcommands:
+(`/var/lib/zellij-relay/relay_tunnel_auth_tokens.db` by default), on
+the `relay-data` named volume so the DB survives container
+recreation. `deploy.sh` exposes wrapper subcommands that drive the
+relay binary inside the running container via the same SSH docker
+context as the rest of the script:
 
 ```sh
-# Inside the deployed relay container:
-./deploy.sh exec relay zellij-relay create-token my-laptop
-./deploy.sh exec relay zellij-relay list-tokens
-./deploy.sh exec relay zellij-relay revoke-token my-laptop
+./deploy.sh create-token my-laptop --vps-ip 203.0.113.42 --vps-user debian
+./deploy.sh list-tokens             --vps-ip 203.0.113.42 --vps-user debian
+./deploy.sh revoke-token my-laptop  --vps-ip 203.0.113.42 --vps-user debian
 ```
+
+The label is also accepted via `--label <name>` if a positional value
+is awkward in your shell.
 
 `create-token` prints the raw token **once** — store it securely. Only
 the SHA-256 hash is written to disk.
