@@ -38,6 +38,16 @@
         <input type="hidden" id="zellij-is-read-only" value="IS_READ_ONLY" />
         <input type="hidden" id="zellij-session-rows" value="SESSION_ROWS" />
         <input type="hidden" id="zellij-session-cols" value="SESSION_COLS" />
+        <!--
+          Auth-flow profile, server-asserted. Values:
+            * "relay" — relay-fan-out viewer page; no server-side cookie
+              persistence (the E2E key is derived from the raw token, which
+              only the browser holds).
+            * "local" — standalone web-client page; the server holds a
+              session cookie and issues a persistent variant when
+              `remember_me` is set on /command/login.
+        -->
+        <input type="hidden" id="zellij-auth-mode" value="AUTH_MODE" />
         <div id="terminal" tabindex="0"></div>
         <script src="assets/modals.js"></script>
         <!-- Module files - order matters -->

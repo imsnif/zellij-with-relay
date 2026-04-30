@@ -133,6 +133,7 @@ pub async fn serve_html(
         .replace("IS_READ_ONLY", "false")
         .replace("SESSION_ROWS", "0")
         .replace("SESSION_COLS", "0")
+        .replace("AUTH_MODE", "relay")
         .replace("BASE_URL", &base_url);
     Html(html)
 }
@@ -318,7 +319,7 @@ fn build_session_cookie(slug: &str, viewer_id: Uuid) -> Cookie<'static> {
     Cookie::build((SESSION_COOKIE, viewer_id.to_string()))
         .http_only(true)
         .same_site(SameSite::Strict)
-        .path(format!("/r/{}/", slug))
+        .path(format!("/r/{}", slug))
         .build()
 }
 

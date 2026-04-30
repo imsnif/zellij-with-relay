@@ -9,6 +9,7 @@ body {
     width: var(--dynamic-vw, 100vw);
     margin: 0;
     overflow: hidden;
+    background: #000;
 }
 
 #terminal {
@@ -18,4 +19,5 @@ body {
     overflow: hidden;
     overscroll-behavior: contain;
     touch-action: pan-y;
+    background: #000;
 }
