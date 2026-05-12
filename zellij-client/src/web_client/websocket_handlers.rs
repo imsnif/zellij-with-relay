@@ -445,7 +445,7 @@ async fn handle_ws_terminal(
     os_input.send_to_server(ClientToServerMsg::ClientExited);
 }
 
-fn terminal_metrics_to_ipc(metrics: TerminalMetricsPayload) -> ClientToServerMsg {
+pub(crate) fn terminal_metrics_to_ipc(metrics: TerminalMetricsPayload) -> ClientToServerMsg {
     ClientToServerMsg::TerminalPixelDimensions {
         pixel_dimensions: PixelDimensions {
             text_area_size: Some(SizeInPixels {

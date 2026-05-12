@@ -5476,7 +5476,7 @@ dependencies = [
 
 [[package]]
 name = "zellij"
-version = "0.45.0"
+version = "0.44.2"
 dependencies = [
  "anyhow",
  "clap 3.2.4",
@@ -5503,11 +5503,11 @@ dependencies = [
 
 [[package]]
 name = "zellij-ansi-clip"
-version = "0.45.0"
+version = "0.44.2"
 
 [[package]]
 name = "zellij-client"
-version = "0.45.0"
+version = "0.44.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5549,7 +5549,7 @@ dependencies = [
  "url",
  "urlencoding",
  "uuid",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
  "zellij-ansi-clip",
  "zellij-relay-protocol",
  "zellij-utils",
@@ -5558,7 +5558,7 @@ dependencies = [
 
 [[package]]
 name = "zellij-relay"
-version = "0.45.0"
+version = "0.44.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -5587,7 +5587,7 @@ dependencies = [
 
 [[package]]
 name = "zellij-relay-protocol"
-version = "0.45.0"
+version = "0.44.2"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -5601,7 +5601,7 @@ dependencies = [
 
 [[package]]
 name = "zellij-server"
-version = "0.45.0"
+version = "0.44.2"
 dependencies = [
  "ansi_term",
  "anyhow",
@@ -5645,13 +5645,13 @@ dependencies = [
  "vte 0.11.0",
  "wasmi",
  "wasmi_wasi",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
  "zellij-utils",
 ]
 
 [[package]]
 name = "zellij-tile"
-version = "0.45.0"
+version = "0.44.2"
 dependencies = [
  "clap 3.2.4",
  "prost",
@@ -5664,14 +5664,14 @@ dependencies = [
 
 [[package]]
 name = "zellij-tile-utils"
-version = "0.45.0"
+version = "0.44.2"
 dependencies = [
  "ansi_term",
 ]
 
 [[package]]
 name = "zellij-utils"
-version = "0.45.0"
+version = "0.44.2"
 dependencies = [
  "anyhow",
  "backtrace",
@@ -5722,12 +5722,12 @@ dependencies = [
  "url",
  "uuid",
  "winapi",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "zellij-web-client-assets"
-version = "0.45.0"
+version = "0.44.2"
 dependencies = [
  "include_dir",
 ]

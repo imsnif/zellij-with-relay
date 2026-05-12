@@ -66,6 +66,7 @@ use crate::web_client::control_message::{
 };
 use crate::web_client::message_handlers::{parse_stdin, StdinSession};
 use crate::web_client::server_listener::zellij_server_listener;
+use super::super::websocket_handlers::terminal_metrics_to_ipc;
 
 pub async fn run_multiplexer(
     state: Arc<RelayTunnelState>,
@@ -849,6 +850,9 @@ fn dispatch_control_message(
     let client_msg = match msg.payload {
         WebClientToWebServerControlMessagePayload::TerminalResize(size) => {
             ClientToServerMsg::TerminalResize { new_size: size }
+        },
+        WebClientToWebServerControlMessagePayload::TerminalMetrics(metrics) => {
+            terminal_metrics_to_ipc(metrics)
         },
     };
     let _ = os_api.send_to_server(client_msg);
