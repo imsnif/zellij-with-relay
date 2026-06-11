@@ -55,6 +55,7 @@ fn e2e_build(sh: &Shell) -> anyhow::Result<()> {
             no_plugins: false,
             plugins_only: true,
             no_web: false,
+            wasm_clip: false,
         },
     )
     .context(err_context)?;
@@ -153,6 +154,7 @@ fn build_release(sh: &Shell, no_web: bool) -> anyhow::Result<()> {
             no_plugins: false,
             plugins_only: true,
             no_web,
+            wasm_clip: false,
         },
     )
     .context(err_context)?;
@@ -245,6 +247,7 @@ fn cross_compile(sh: &Shell, target: &OsString, no_web: bool) -> anyhow::Result<
             no_plugins: false,
             plugins_only: true,
             no_web,
+            wasm_clip: false,
         },
     )
     .and_then(|_| build::manpage(sh))

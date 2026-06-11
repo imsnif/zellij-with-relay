@@ -2612,6 +2612,30 @@ pub fn stop_sharing_current_session() {
     unsafe { host_run_plugin_command() };
 }
 
+pub fn share_current_session_to_relay() {
+    let plugin_command = PluginCommand::ShareCurrentSessionToRelay;
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
+pub fn stop_sharing_current_session_from_relay() {
+    let plugin_command = PluginCommand::StopSharingCurrentSessionFromRelay;
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
+/// Persist a relay tunnel-auth token into the sharer's runtime config.
+/// Empty string clears the configured token. Requires the plugin to hold
+/// `PermissionType::StartWebServer`.
+pub fn set_relay_tunnel_auth_token(token: String) {
+    let plugin_command = PluginCommand::SetRelayTunnelAuthToken(token);
+    let protobuf_plugin_command: ProtobufPluginCommand = plugin_command.try_into().unwrap();
+    object_to_stdout(&protobuf_plugin_command.encode_to_vec());
+    unsafe { host_run_plugin_command() };
+}
+
 pub fn group_and_ungroup_panes(
     pane_ids_to_group: Vec<PaneId>,
     pane_ids_to_ungroup: Vec<PaneId>,

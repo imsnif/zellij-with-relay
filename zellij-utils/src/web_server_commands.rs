@@ -1,5 +1,6 @@
 use crate::consts::is_ipc_socket;
 use crate::consts::WEBSERVER_SOCKET_PATH;
+use crate::data::ClientId;
 use crate::errors::prelude::*;
 use crate::web_server_contract::web_server_contract::InstructionForWebServer as ProtoInstructionForWebServer;
 use crate::web_server_contract::web_server_contract::WebServerResponse as ProtoWebServerResponse;
@@ -45,6 +46,37 @@ pub fn shutdown_all_webserver_instances() -> Result<()> {
 pub enum InstructionForWebServer {
     ShutdownWebServer,
     QueryVersion,
+    StartRelayTunnel {
+        client_id: ClientId,
+        session_name: String,
+        relay_url: String,
+        zellij_version: String,
+        /// Phase 6 Session C: shared-secret tunnel-auth token. Sent on
+        /// `TunnelAuth.token`; a missing or unknown token is rejected by
+        /// the relay with `TunnelError { message: "relay tunnel auth
+        /// rejected" }`. Empty string is treated as "not configured".
+        relay_tunnel_auth_token: String,
+    },
+    StopRelayTunnel {
+        client_id: ClientId,
+    },
+    /// Phase 6 (Session A): poll for the current relay-tunnel status.
+    /// The response is a `RelayTunnelStatusReport` whose `status_url`
+    /// carries either a live public URL or a sentinel-encoded state
+    /// (`__RELAY_RECONNECTING__:<attempt>` /
+    /// `__RELAY_FAILED__:<message>`), or the empty string if no tunnel
+    /// is registered for this `client_id`.
+    GetRelayTunnelStatus {
+        client_id: ClientId,
+    },
+    /// Phase 6 Session C: broadcast a token revocation to every active
+    /// relay tunnel registered in this web-server process. The relay
+    /// disconnects any viewers whose sessions are keyed on that hash.
+    /// Fire-and-forget; a `WebServerResponse::Version` is sent back
+    /// purely so the IPC socket closes cleanly.
+    RevokeRelayToken {
+        token_hash: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -57,6 +89,27 @@ pub struct VersionInfo {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum WebServerResponse {
     Version(VersionInfo),
+    RelayTunnelEstablished {
+        client_id: ClientId,
+        public_url: String,
+        slug: String,
+        tunnel_id: String,
+    },
+    RelayTunnelStopped {
+        client_id: ClientId,
+    },
+    RelayTunnelError {
+        client_id: ClientId,
+        message: String,
+    },
+    /// Phase 6 (Session A): reply to `GetRelayTunnelStatus`. `status_url`
+    /// is empty when no tunnel is registered, a live URL when connected,
+    /// or a sentinel (`__RELAY_RECONNECTING__:<attempt>` /
+    /// `__RELAY_FAILED__:<message>`) while the supervisor is retrying.
+    RelayTunnelStatusReport {
+        client_id: ClientId,
+        status_url: String,
+    },
 }
 
 pub fn create_webserver_sender(path: &str) -> Result<BufWriter<LocalSocketStream>> {

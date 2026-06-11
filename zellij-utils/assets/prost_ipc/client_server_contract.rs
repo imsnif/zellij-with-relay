@@ -1965,6 +1965,12 @@ pub struct Options {
     pub mobile_threshold_cols: ::core::option::Option<u32>,
     #[prost(uint32, optional, tag="50")]
     pub mobile_threshold_rows: ::core::option::Option<u32>,
+    #[prost(string, optional, tag="51")]
+    pub relay_server_url: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(bool, optional, tag="52")]
+    pub encrypt_web_sharing: ::core::option::Option<bool>,
+    #[prost(string, optional, tag="53")]
+    pub relay_tunnel_auth_token: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// Pane-targeting action messages
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -2927,7 +2933,7 @@ impl MobileLayout {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ClientToServerMsg {
-    #[prost(oneof="client_to_server_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21")]
+    #[prost(oneof="client_to_server_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22")]
     pub message: ::core::option::Option<client_to_server_msg::Message>,
 }
 /// Nested message and enum types in `ClientToServerMsg`.
@@ -2977,6 +2983,8 @@ pub mod client_to_server_msg {
         HostTerminalThemeChanged(super::HostTerminalThemeChangedMsg),
         #[prost(message, tag="21")]
         SoftKeyboardVisibilityChanged(super::SoftKeyboardVisibilityChangedMsg),
+        #[prost(message, tag="22")]
+        AttachRelayWatcherClient(super::AttachRelayWatcherClientMsg),
     }
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -3043,6 +3051,16 @@ pub struct AttachWatcherClientMsg {
     #[prost(message, optional, tag="1")]
     pub terminal_size: ::core::option::Option<Size>,
     #[prost(bool, tag="2")]
+    pub is_web_client: bool,
+}
+/// Attach the client as a virtual watcher proxied through the relay for r/o
+/// fan-out. The relay already has an established tunnel so the terminal size
+/// is not negotiated here — the server registers the watcher at the current
+/// session viewport size.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AttachRelayWatcherClientMsg {
+    #[prost(bool, tag="1")]
     pub is_web_client: bool,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -3188,7 +3206,7 @@ impl HostTerminalThemeIndication {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ServerToClientMsg {
-    #[prost(oneof="server_to_client_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17")]
+    #[prost(oneof="server_to_client_msg::Message", tags="1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18")]
     pub message: ::core::option::Option<server_to_client_msg::Message>,
 }
 /// Nested message and enum types in `ServerToClientMsg`.
@@ -3230,6 +3248,8 @@ pub mod server_to_client_msg {
         ForwardQueryToHost(super::ForwardQueryToHostMsg),
         #[prost(message, tag="17")]
         SetSoftKeyboard(super::SetSoftKeyboardMsg),
+        #[prost(message, tag="18")]
+        SessionSize(super::SessionSizeMsg),
     }
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -3342,4 +3362,14 @@ pub struct ForwardQueryToHostMsg {
 pub struct SetSoftKeyboardMsg {
     #[prost(bool, tag="1")]
     pub on: bool,
+}
+/// Delivered to relay-fan-out virtual watchers so the multiplexer can push
+/// the current session-viewport size out to the relay.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SessionSizeMsg {
+    #[prost(uint32, tag="1")]
+    pub rows: u32,
+    #[prost(uint32, tag="2")]
+    pub cols: u32,
 }

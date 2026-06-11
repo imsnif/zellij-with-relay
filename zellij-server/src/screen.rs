@@ -819,11 +819,13 @@ pub enum ScreenInstruction {
     TogglePaneInGroup(ClientId, Option<NotificationEnd>),
     ToggleGroupMarking(ClientId, Option<NotificationEnd>),
     SessionSharingStatusChange(bool),
+    RemoteShareUrlChange(Option<String>),
     SetMouseSelectionSupport(PaneId, bool),
     InterceptKeyPresses(PluginId, ClientId),
     ClearKeyPressesIntercepts(ClientId),
     ReplacePaneWithExistingPane(PaneId, PaneId, bool, Option<NotificationEnd>), // bool -> suppress_replaced_pane
     AddWatcherClient(ClientId, Size),
+    AddRelayWatcherClient(ClientId),
     RemoveWatcherClient(ClientId),
     SetFollowedClient(ClientId),
     WatcherTerminalResize(ClientId, Size),
@@ -1165,6 +1167,7 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::SessionSharingStatusChange(..) => {
                 ScreenContext::SessionSharingStatusChange
             },
+            ScreenInstruction::RemoteShareUrlChange(..) => ScreenContext::RemoteShareUrlChange,
             ScreenInstruction::SetMouseSelectionSupport(..) => {
                 ScreenContext::SetMouseSelectionSupport
             },
@@ -1176,6 +1179,7 @@ impl From<&ScreenInstruction> for ScreenContext {
                 ScreenContext::ReplacePaneWithExistingPane
             },
             ScreenInstruction::AddWatcherClient(..) => ScreenContext::AddWatcherClient,
+            ScreenInstruction::AddRelayWatcherClient(..) => ScreenContext::AddWatcherClient,
             ScreenInstruction::RemoveWatcherClient(..) => ScreenContext::RemoveWatcherClient,
             ScreenInstruction::SetFollowedClient(..) => ScreenContext::SetFollowedClient,
             ScreenInstruction::WatcherTerminalResize(..) => ScreenContext::WatcherTerminalResize,
@@ -1353,6 +1357,11 @@ impl RenderBlocker {
 pub(crate) struct WatcherState {
     size: Size,
     should_force_render: bool,
+    /// True when the watcher is a virtual client owned by a relay r/o
+    /// fan-out group — its size must track the Screen's own size so the
+    /// ciphertext stream produced by `Output::serialize_with_size` matches
+    /// the real session viewport for any number of browser viewers.
+    is_relay_fanout: bool,
 }
 
 impl WatcherState {
@@ -1360,6 +1369,15 @@ impl WatcherState {
         WatcherState {
             size,
             should_force_render: true,
+            is_relay_fanout: false,
+        }
+    }
+
+    pub fn new_relay_fanout(size: Size) -> Self {
+        WatcherState {
+            size,
+            should_force_render: true,
+            is_relay_fanout: true,
         }
     }
 
@@ -1381,6 +1399,10 @@ impl WatcherState {
 
     pub fn set_force_render(&mut self) {
         self.should_force_render = true;
+    }
+
+    pub fn is_relay_fanout(&self) -> bool {
+        self.is_relay_fanout
     }
 }
 
@@ -1443,6 +1465,7 @@ pub(crate) struct Screen {
     default_editor: Option<PathBuf>,
     web_clients_allowed: bool,
     web_sharing: WebSharing,
+    remote_share_url: Option<String>,
     current_pane_group: Rc<RefCell<PaneGroups>>,
     advanced_mouse_actions: bool,
     mouse_hover_effects: bool,
@@ -1601,6 +1624,7 @@ impl Screen {
             default_editor,
             web_clients_allowed,
             web_sharing,
+            remote_share_url: None,
             current_pane_group: Rc::new(RefCell::new(current_pane_group)),
             currently_marking_pane_group: Rc::new(RefCell::new(HashMap::new())),
             advanced_mouse_actions,
@@ -2347,6 +2371,16 @@ impl Screen {
                     .with_context(err_context)?;
                 tab.set_force_render();
             }
+            // Relay-fan-out virtual watchers are registered at the session
+            // viewport size; propagate the new size so their outbound
+            // stream stays in sync with the real terminal state.
+            for watcher_state in self.watcher_clients.values_mut() {
+                if watcher_state.is_relay_fanout() {
+                    watcher_state.set_size(new_screen_size);
+                    watcher_state.set_force_render();
+                }
+            }
+            self.broadcast_session_size_to_relay_watchers(new_screen_size);
             self.log_and_report_session_state()
                 .with_context(err_context)?;
             self.render(None).with_context(err_context)
@@ -3593,6 +3627,47 @@ impl Screen {
         self.render(None)?;
 
         Ok(())
+    }
+
+    /// Register a relay-fan-out virtual watcher at the current session
+    /// viewport size. Subsequent `resize_to_screen` updates propagate to
+    /// every watcher with `is_relay_fanout == true`.
+    pub fn add_relay_watcher_client(&mut self, client_id: ClientId) -> Result<()> {
+        let size = self.size;
+        self.watcher_clients
+            .insert(client_id, WatcherState::new_relay_fanout(size));
+        if let Some(os_input) = &self.bus.os_input {
+            let _ = os_input.send_to_client(
+                client_id,
+                ServerToClientMsg::SessionSize {
+                    rows: size.rows as u32,
+                    cols: size.cols as u32,
+                },
+            );
+        }
+        self.render(None)?;
+        Ok(())
+    }
+
+    /// Broadcast the current session-viewport size to every relay-fan-out
+    /// virtual watcher. Called from `resize_to_screen` so browser-side
+    /// clippers can re-emit against the fresh dimensions without any
+    /// additional plumbing.
+    fn broadcast_session_size_to_relay_watchers(&mut self, size: Size) {
+        let Some(os_input) = &self.bus.os_input else {
+            return;
+        };
+        for (client_id, watcher_state) in self.watcher_clients.iter() {
+            if watcher_state.is_relay_fanout() {
+                let _ = os_input.send_to_client(
+                    *client_id,
+                    ServerToClientMsg::SessionSize {
+                        rows: size.rows as u32,
+                        cols: size.cols as u32,
+                    },
+                );
+            }
+        }
     }
 
     pub fn remove_watcher_client(&mut self, client_id: ClientId) {
@@ -9788,6 +9863,14 @@ pub(crate) fn screen_thread_main(
                 let _ = screen.log_and_report_session_state();
                 let _ = screen.render(None);
             },
+            ScreenInstruction::RemoteShareUrlChange(url) => {
+                screen.remote_share_url = url.clone();
+                for tab in screen.tabs.values_mut() {
+                    tab.update_remote_share_url(url.clone());
+                }
+                let _ = screen.log_and_report_session_state();
+                let _ = screen.render(None);
+            },
             ScreenInstruction::HighlightAndUnhighlightPanes(
                 pane_ids_to_highlight,
                 pane_ids_to_unhighlight,
@@ -9902,6 +9985,11 @@ pub(crate) fn screen_thread_main(
                     .context("failed to add watcher client")?;
                 screen.set_watcher_size(client_id, size);
                 screen.render(None)?;
+            },
+            ScreenInstruction::AddRelayWatcherClient(client_id) => {
+                screen
+                    .add_relay_watcher_client(client_id)
+                    .context("failed to add relay watcher client")?;
             },
             ScreenInstruction::RemoveWatcherClient(client_id) => {
                 screen.remove_watcher_client(client_id);

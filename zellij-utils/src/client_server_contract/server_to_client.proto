@@ -22,6 +22,7 @@ message ServerToClientMsg {
     SubscribedPaneClosedMsg subscribed_pane_closed = 15;
     ForwardQueryToHostMsg forward_query_to_host = 16;
     SetSoftKeyboardMsg set_soft_keyboard = 17;
+    SessionSizeMsg session_size = 18;
   }
 }
 
@@ -98,4 +99,11 @@ message ForwardQueryToHostMsg {
 
 message SetSoftKeyboardMsg {
   bool on = 1;
+}
+
+// Delivered to relay-fan-out virtual watchers so the multiplexer can push
+// the current session-viewport size out to the relay.
+message SessionSizeMsg {
+  uint32 rows = 1;
+  uint32 cols = 2;
 }

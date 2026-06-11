@@ -57,6 +57,7 @@ pub fn spawn_new_session(
 
 pub fn create_first_message(
     is_read_only: bool,
+    is_relay_fanout: bool,
     config_file_path: Option<PathBuf>,
     client_attributes: ClientAttributes,
     mut config_opts: Options,
@@ -81,7 +82,12 @@ pub fn create_first_message(
     config_opts.web_sharing = Some(WebSharing::On);
 
     let is_web_client = true;
-    if is_read_only {
+    if is_read_only && is_relay_fanout {
+        // Relay r/o fan-out: the server registers the virtual watcher at the
+        // current session viewport size so all browser viewers share a
+        // single ciphertext stream. No viewer-reported size is negotiated.
+        ClientToServerMsg::AttachRelayWatcherClient { is_web_client }
+    } else if is_read_only {
         // read only clients attach as watchers
         ClientToServerMsg::AttachWatcherClient {
             terminal_size: client_attributes.size,

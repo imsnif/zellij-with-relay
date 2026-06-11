@@ -1,12 +1,17 @@
 use axum_server::Handle;
 use interprocess::local_socket::traits::tokio::Listener;
 use std::net::IpAddr;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zellij_utils::consts::{ipc_bind_async, WEBSERVER_SOCKET_PATH};
+use zellij_utils::input::{config::Config, options::Options};
 use zellij_utils::prost::Message;
 use zellij_utils::web_server_commands::{InstructionForWebServer, VersionInfo, WebServerResponse};
 use zellij_utils::web_server_contract::web_server_contract::InstructionForWebServer as ProtoInstructionForWebServer;
 use zellij_utils::web_server_contract::web_server_contract::WebServerResponse as ProtoWebServerResponse;
+
+use crate::web_client::types::{ClientOsApiFactory, ConnectionTable, SessionManager};
 
 pub async fn create_webserver_receiver(
     id: &str,
@@ -60,11 +65,21 @@ pub async fn send_webserver_response(
     Ok(())
 }
 
+pub struct RelayContext {
+    pub connection_table: Arc<Mutex<ConnectionTable>>,
+    pub os_api_factory: Arc<dyn ClientOsApiFactory>,
+    pub session_manager: Arc<dyn SessionManager>,
+    pub config: Arc<Mutex<Config>>,
+    pub config_options: Options,
+    pub config_file_path: PathBuf,
+}
+
 pub async fn listen_to_web_server_instructions(
     server_handle: Handle,
     id: &str,
     web_server_ip: IpAddr,
     web_server_port: u16,
+    relay_ctx: RelayContext,
 ) {
     loop {
         let receiver = create_webserver_receiver(id).await;
@@ -81,6 +96,78 @@ pub async fn listen_to_web_server_instructions(
                             ip: web_server_ip.to_string(),
                             port: web_server_port,
                         });
+                        let _ = send_webserver_response(&mut receiver, response).await;
+                    },
+                    InstructionForWebServer::StartRelayTunnel {
+                        client_id,
+                        session_name,
+                        relay_url,
+                        zellij_version,
+                        relay_tunnel_auth_token,
+                    } => {
+                        let response = match crate::web_client::relay::start_relay_tunnel(
+                            client_id,
+                            relay_url,
+                            session_name,
+                            zellij_version,
+                            relay_tunnel_auth_token,
+                            relay_ctx.connection_table.clone(),
+                            relay_ctx.os_api_factory.clone(),
+                            relay_ctx.session_manager.clone(),
+                            relay_ctx.config.clone(),
+                            relay_ctx.config_options.clone(),
+                            relay_ctx.config_file_path.clone(),
+                        )
+                        .await
+                        {
+                            Ok(public_url) => WebServerResponse::RelayTunnelEstablished {
+                                client_id,
+                                public_url,
+                                slug: String::new(),
+                                tunnel_id: String::new(),
+                            },
+                            Err(e) => {
+                                log::error!("Relay tunnel establish failed: {:#}", e);
+                                WebServerResponse::RelayTunnelError {
+                                    client_id,
+                                    message: format!("{:#}", e),
+                                }
+                            },
+                        };
+                        let _ = send_webserver_response(&mut receiver, response).await;
+                    },
+                    InstructionForWebServer::StopRelayTunnel { client_id } => {
+                        let _ =
+                            crate::web_client::relay::stop_relay_tunnel(client_id).await;
+                        let response = WebServerResponse::RelayTunnelStopped { client_id };
+                        let _ = send_webserver_response(&mut receiver, response).await;
+                    },
+                    InstructionForWebServer::GetRelayTunnelStatus { client_id } => {
+                        let status_url =
+                            crate::web_client::relay::get_relay_tunnel_status_sentinel(
+                                client_id,
+                            )
+                            .await;
+                        let response = WebServerResponse::RelayTunnelStatusReport {
+                            client_id,
+                            status_url,
+                        };
+                        let _ = send_webserver_response(&mut receiver, response).await;
+                    },
+                    InstructionForWebServer::RevokeRelayToken { token_hash } => {
+                        crate::web_client::relay::broadcast_revoke_token(token_hash)
+                            .await;
+                        // Fire-and-forget. Reply with a bogus version
+                        // payload purely so the IPC socket closes with a
+                        // well-formed protobuf — matches the existing
+                        // response-required round-trip pattern.
+                        let response = WebServerResponse::Version(
+                            zellij_utils::web_server_commands::VersionInfo {
+                                version: zellij_utils::consts::VERSION.to_string(),
+                                ip: String::new(),
+                                port: 0,
+                            },
+                        );
                         let _ = send_webserver_response(&mut receiver, response).await;
                     },
                 },

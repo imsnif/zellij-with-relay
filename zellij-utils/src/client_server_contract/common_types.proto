@@ -1181,6 +1181,9 @@ message Options {
   optional MobileLayout mobile_layout = 48;
   optional uint32 mobile_threshold_cols = 49;
   optional uint32 mobile_threshold_rows = 50;
+  optional string relay_server_url = 51;
+  optional bool encrypt_web_sharing = 52;
+  optional string relay_tunnel_auth_token = 53;
 }
 
 enum OnForceClose {

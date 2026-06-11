@@ -35,6 +35,9 @@ pub enum WebServerToWebClientControlMessage {
     LogError { lines: Vec<String> },
     SwitchedSession { new_session_name: String },
     SetSoftKeyboard { on: bool },
+    /// Sharer-side session viewport size, forwarded to r/o viewers so the
+    /// browser clipper can re-emit at the new dimensions.
+    SessionSizeChanged { rows: u32, cols: u32 },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

@@ -1,4 +1,4 @@
-use super::CoordinatesInLine;
+use super::{CoordinatesInLine, AUTH_REJECTED_NEEDLE};
 use crate::ui_components::{
     hovering_on_line, render_text_with_underline, CurrentSessionSection, Usage,
     WebServerStatusSection,
@@ -7,6 +7,8 @@ use zellij_tile::prelude::*;
 
 use std::collections::HashMap;
 use url::Url;
+
+const PUBLIC_URL_PREFIX: &str = "Public URL: ";
 
 pub struct MainScreenState {
     pub currently_hovering_over_link: bool,
@@ -27,6 +29,11 @@ pub struct MainScreen<'a> {
     hover_coordinates: Option<(usize, usize)>,
     info: &'a Option<String>,
     link_executable: &'a Option<&'a str>,
+    remote_share_url: &'a Option<String>,
+    /// Phase 6 Session C: when `Some`, the public-URL row is replaced
+    /// with an inline text prompt into which the operator types the
+    /// relay tunnel-auth token.
+    entering_relay_tunnel_auth_token: &'a Option<String>,
 }
 
 impl<'a> MainScreen<'a> {
@@ -50,6 +57,8 @@ impl<'a> MainScreen<'a> {
         hover_coordinates: Option<(usize, usize)>,
         info: &'a Option<String>,
         link_executable: &'a Option<&'a str>,
+        remote_share_url: &'a Option<String>,
+        entering_relay_tunnel_auth_token: &'a Option<String>,
     ) -> Self {
         Self {
             token_list_is_empty,
@@ -64,6 +73,8 @@ impl<'a> MainScreen<'a> {
             hover_coordinates,
             info,
             link_executable,
+            remote_share_url,
+            entering_relay_tunnel_auth_token,
         }
     }
 
@@ -114,6 +125,29 @@ impl<'a> MainScreen<'a> {
         let mut total_height =
             2 + web_server_height + 1 + current_session_height + 1 + usage_height;
 
+        total_height += 2;
+        let hint_width = if let Some(buf) = self.entering_relay_tunnel_auth_token {
+            // `Relay auth token: <buf>_ (<Esc> - Cancel, <Enter> - Confirm)`
+            format!(
+                "Relay auth token: {}_ (<Esc> - Cancel, <Enter> - Confirm)",
+                buf
+            )
+            .len()
+        } else {
+            match self.remote_share_url {
+                Some(url) if url.starts_with("__RELAY_FAILED__:")
+                    && url["__RELAY_FAILED__:".len()..].contains(AUTH_REJECTED_NEEDLE) =>
+                {
+                    "Public URL: <relay rejected auth token> (<i> - Enter Token)".len()
+                },
+                Some(url) => {
+                    format!("Public URL: {} (<I> - Stop, <A> - Rotate Token)", url).len()
+                },
+                None => "Public URL: <not shared> (<i> - Share to Public URL)".len(),
+            }
+        };
+        max_width = max_width.max(hint_width);
+
         if self.connection_is_unencrypted() {
             let warning_width = self.unencrypted_warning_width();
             max_width = max_width.max(warning_width);
@@ -138,6 +172,7 @@ impl<'a> MainScreen<'a> {
 
         current_y = self.render_web_server_section(layout, current_y, state);
         current_y = self.render_current_session_section(layout, current_y, state);
+        current_y = self.render_remote_share_url(layout, current_y, state);
         current_y = self.render_usage_section(layout, current_y);
         current_y = self.render_warnings_and_help(layout, current_y, state);
 
@@ -209,6 +244,132 @@ impl<'a> MainScreen<'a> {
         }
 
         y + layout.web_server_height + 1
+    }
+
+    fn render_remote_share_url(
+        &self,
+        layout: &Layout,
+        y: usize,
+        state: &mut MainScreenState,
+    ) -> usize {
+        // If the operator is mid-way through entering a relay tunnel
+        // auth token, swap the public-URL row for the inline prompt.
+        // Everything else keeps the same geometry so the rest of the
+        // layout stays stable as they type.
+        if let Some(buf) = self.entering_relay_tunnel_auth_token {
+            let label = format!(
+                "Relay auth token: {}_ (<Esc> - Cancel, <Enter> - Confirm)",
+                buf
+            );
+            let hint_start = label.len() - "(<Esc> - Cancel, <Enter> - Confirm)".len();
+            let text = Text::new(&label)
+                .color_range(2, ..16)
+                .color_range(1, 18..hint_start)
+                .color_range(3, hint_start..);
+            print_text_with_coordinates(text, layout.base_x, y, None, None);
+            return y + 2;
+        }
+
+        // `remote_share_url` is either a live URL, one of three status
+        // sentinels, or None. The sentinels:
+        //   `__RELAY_RECONNECTING__:<attempt>` — supervisor retrying
+        //   `__RELAY_FAILED__:<message>`       — permanent failure
+        // Within the Failed branch we key off the relay's
+        // "Relay requires protocol version" error template to render a
+        // dedicated protocol-mismatch label, and off the
+        // "relay tunnel auth rejected" template for the auth-rejection
+        // branch. Both run through the same `__RELAY_FAILED__:` envelope;
+        // the Zellij client prepends `relay rejected tunnel: ` before the
+        // IPC, so substring matches are the robust check.
+        const RECONNECTING: &str = "__RELAY_RECONNECTING__:";
+        const FAILED: &str = "__RELAY_FAILED__:";
+        const PROTOCOL_MISMATCH_NEEDLE: &str = "Relay requires protocol version";
+        match self.remote_share_url {
+            Some(url) if url.starts_with(RECONNECTING) => {
+                let attempt = &url[RECONNECTING.len()..];
+                let label = format!(
+                    "Public URL: <reconnecting… attempt {}> (<I> - Cancel)",
+                    attempt
+                );
+                let stop_hint_start = label.len() - "(<I> - Cancel)".len();
+                let text = Text::new(&label)
+                    .color_range(2, ..10)
+                    .color_range(1, 12..stop_hint_start)
+                    .color_range(3, stop_hint_start..);
+                print_text_with_coordinates(text, layout.base_x, y, None, None);
+                y + 2
+            },
+            Some(url)
+                if url.starts_with(FAILED)
+                    && url[FAILED.len()..].contains(PROTOCOL_MISMATCH_NEEDLE) =>
+            {
+                let label =
+                    "Public URL: <protocol mismatch — please upgrade Zellij> (<i> - Retry)";
+                let retry_hint_start = label.len() - "(<i> - Retry)".len();
+                let text = Text::new(label)
+                    .color_range(2, ..10)
+                    .color_range(1, 12..retry_hint_start)
+                    .color_range(3, retry_hint_start..);
+                print_text_with_coordinates(text, layout.base_x, y, None, None);
+                y + 2
+            },
+            Some(url)
+                if url.starts_with(FAILED)
+                    && url[FAILED.len()..].contains(AUTH_REJECTED_NEEDLE) =>
+            {
+                let label =
+                    "Public URL: <relay rejected auth token> (<i> - Enter Token)";
+                let hint_start = label.len() - "(<i> - Enter Token)".len();
+                let text = Text::new(label)
+                    .color_range(2, ..10)
+                    .color_range(1, 12..hint_start)
+                    .color_range(3, hint_start..);
+                print_text_with_coordinates(text, layout.base_x, y, None, None);
+                y + 2
+            },
+            Some(url) if url.starts_with(FAILED) => {
+                let message = &url[FAILED.len()..];
+                let label = format!(
+                    "Public URL: <relay unreachable: {}> (<i> - Retry)",
+                    message
+                );
+                let retry_hint_start = label.len() - "(<i> - Retry)".len();
+                let text = Text::new(&label)
+                    .color_range(2, ..10)
+                    .color_range(1, 12..retry_hint_start)
+                    .color_range(3, retry_hint_start..);
+                print_text_with_coordinates(text, layout.base_x, y, None, None);
+                y + 2
+            },
+            Some(url) => {
+                let label = format!("{}{} (<I> - Stop, <A> - Rotate Token)", PUBLIC_URL_PREFIX, url);
+                let hint_start = label.len() - "(<I> - Stop, <A> - Rotate Token)".len();
+                let text = Text::new(&label)
+                    .color_range(2, ..10)
+                    .color_range(3, hint_start..);
+                print_text_with_coordinates(text, layout.base_x, y, None, None);
+
+                let url_x = layout.base_x + PUBLIC_URL_PREFIX.chars().count();
+                let url_y = y;
+                let url_width = url.chars().count();
+                state.clickable_urls.insert(
+                    CoordinatesInLine::new(url_x, url_y, url_width),
+                    url.clone(),
+                );
+                if hovering_on_line(url_x, url_y, url_width, self.hover_coordinates) {
+                    state.currently_hovering_over_link = true;
+                    render_text_with_underline(url_x, url_y, url);
+                }
+
+                y + 2
+            },
+            None => {
+                let label = "Public URL: <not shared> (<i> - Share to Public URL)";
+                let text = Text::new(label).color_range(2, ..10).color_range(3, 25..);
+                print_text_with_coordinates(text, layout.base_x, y, None, None);
+                y + 2
+            },
+        }
     }
 
     fn render_usage_section(&self, layout: &Layout, y: usize) -> usize {

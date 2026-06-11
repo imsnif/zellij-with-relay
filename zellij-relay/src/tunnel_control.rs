@@ -1,0 +1,523 @@
+//! `/tunnel/control` WebSocket handler.
+//!
+//! Decodes a `ControlMessage::Auth` from the first frame, allocates a slug
+//! and tunnel id, and replies with `ControlMessage::Established`. After the
+//! handshake the socket is split in two:
+//!
+//! - A writer task drains `entry.control_tx` and pushes encoded
+//!   `ControlMessage` bytes into the socket sink.
+//! - A reader task dispatches incoming frames:
+//!     * `AuthResponse` → resolves the oneshot in `entry.pending_auths`.
+//!     * `ControlFrameData` → forwards the inner bytes to the matching
+//!       viewer's control sink as `Message::Text`.
+//!     * Any post-handshake `Auth` / `Established` is logged and dropped.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use axum::{
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        State,
+    },
+    response::Response,
+};
+use futures_util::{SinkExt, StreamExt};
+use tokio::sync::{mpsc, Notify};
+use uuid::Uuid;
+use zellij_relay_protocol::{decode_control_frame, ControlMessage, SUPPORTED_PROTOCOL_VERSIONS};
+
+use crate::heartbeat::{now_millis, spawn_server_heartbeat, HEARTBEAT_TIMEOUT_SECS};
+
+use crate::registry::{AuthResponseResult, TunnelEntry, ViewerRouting};
+use crate::relay_tunnel_auth_tokens::{
+    hash_relay_tunnel_auth_token, validate_relay_tunnel_auth_token_hash,
+};
+use crate::router::AppState;
+use crate::slug;
+
+pub async fn handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
+    ws.on_upgrade(move |socket| handle_socket(socket, state))
+}
+
+async fn handle_socket(mut socket: WebSocket, state: AppState) {
+    let first = match socket.next().await {
+        Some(Ok(Message::Binary(bytes))) => bytes,
+        Some(Ok(other)) => {
+            tracing::warn!(?other, "unexpected first frame on control tunnel");
+            let _ = send_error(&mut socket, "expected binary TunnelAuth frame").await;
+            return;
+        },
+        Some(Err(e)) => {
+            tracing::warn!(error = %e, "control WS error before auth");
+            return;
+        },
+        None => return,
+    };
+
+    let msg = match decode_control_frame(&first) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to decode ControlFrame");
+            let _ = send_error(&mut socket, "malformed ControlFrame").await;
+            return;
+        },
+    };
+
+    let (token, session_name, zellij_version, requested_slug, protocol_version) = match msg {
+        ControlMessage::Auth {
+            token,
+            session_name,
+            zellij_version,
+            requested_slug,
+            protocol_version,
+        } => (
+            token,
+            session_name,
+            zellij_version,
+            requested_slug,
+            protocol_version,
+        ),
+        other => {
+            tracing::warn!(?other, "control tunnel first message was not Auth");
+            let _ = send_error(&mut socket, "first frame must be TunnelAuth").await;
+            return;
+        },
+    };
+
+    // Reject tunnels whose declared `protocol_version` falls outside the
+    // supported range with a templated `TunnelError`. The sharer's plugin
+    // keys off the "Relay requires protocol version" substring to render
+    // a dedicated protocol-mismatch state.
+    if !SUPPORTED_PROTOCOL_VERSIONS.contains(&protocol_version) {
+        let message = format!(
+            "Relay requires protocol version {}\u{2013}{}, but this Zellij speaks version {}. Please update Zellij.",
+            SUPPORTED_PROTOCOL_VERSIONS.start(),
+            SUPPORTED_PROTOCOL_VERSIONS.end(),
+            protocol_version,
+        );
+        tracing::warn!(
+            protocol_version,
+            supported_start = *SUPPORTED_PROTOCOL_VERSIONS.start(),
+            supported_end = *SUPPORTED_PROTOCOL_VERSIONS.end(),
+            %zellij_version,
+            "rejecting tunnel: protocol version mismatch"
+        );
+        let _ = send_error(&mut socket, &message).await;
+        return;
+    }
+
+    // Phase 6 Session C: tunnel-auth token check. Empty or unknown token
+    // hashes are rejected uniformly as "relay tunnel auth rejected" — the
+    // sharer-side share plugin keys off that exact substring to surface
+    // the `<relay rejected auth token>` state. A DB error is treated as
+    // a rejection as well so mis-provisioned relays never silently admit
+    // connections.
+    let hash = hash_relay_tunnel_auth_token(&token);
+    let accepted = match validate_relay_tunnel_auth_token_hash(&hash) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(error = %e, "relay_tunnel_auth_tokens DB error; rejecting tunnel");
+            false
+        },
+    };
+    if !accepted {
+        tracing::info!(
+            %zellij_version,
+            %session_name,
+            empty_token = token.is_empty(),
+            "rejecting tunnel: relay tunnel auth rejected"
+        );
+        let _ = send_error(&mut socket, "relay tunnel auth rejected").await;
+        return;
+    }
+
+    // Phase 6 reconnect: honour the client's `requested_slug` if it was
+    // supplied and is still free. Occupied slugs fall back to a fresh
+    // random slug so a stale reconnect attempt never hijacks a live
+    // tunnel. Empty string means fresh tunnel → always generate.
+    let slug = if !requested_slug.is_empty() && state.registry.get(&requested_slug).is_none() {
+        tracing::info!(%requested_slug, "reusing client-requested slug on reconnect");
+        requested_slug
+    } else {
+        if !requested_slug.is_empty() {
+            tracing::info!(
+                %requested_slug,
+                "requested slug unavailable on reconnect — allocating fresh"
+            );
+        }
+        slug::generate()
+    };
+    let tunnel_id = Uuid::new_v4();
+    let public_url = state.render_public_url(&slug);
+
+    let (control_tx, mut control_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let entry = Arc::new(TunnelEntry {
+        tunnel_id,
+        slug: slug.clone(),
+        public_url: public_url.clone(),
+        session_name: session_name.clone(),
+        zellij_version,
+        created_at: Instant::now(),
+        terminal_linked: Arc::new(Notify::new()),
+        terminal_linked_flag: Arc::new(Mutex::new(false)),
+        control_tx,
+        terminal_tx: Mutex::new(None),
+        pending_auths: Mutex::new(HashMap::new()),
+        viewers: Mutex::new(HashMap::new()),
+        sessions: Mutex::new(HashMap::new()),
+        client_id_to_viewer: Mutex::new(HashMap::new()),
+        ro_groups: Mutex::new(HashMap::new()),
+        client_id_to_token_hash: Mutex::new(HashMap::new()),
+    });
+    state.registry.insert(entry.clone());
+    tracing::info!(%slug, %tunnel_id, %session_name, "tunnel established");
+
+    let established = ControlMessage::Established {
+        public_url: public_url.clone(),
+        slug: slug.clone(),
+        tunnel_id: tunnel_id.to_string(),
+    };
+    if let Err(e) = socket.send(Message::Binary(established.encode().into())).await {
+        tracing::warn!(error = %e, "failed to send TunnelEstablished");
+        state.registry.remove(&slug);
+        return;
+    }
+
+    // Split the control socket: writer task drains control_rx plus a
+    // dedicated heartbeat-ping channel, reader task dispatches incoming
+    // frames.
+    let (mut sink, mut stream) = socket.split();
+
+    let (hb_ping_tx, mut hb_ping_rx) = mpsc::unbounded_channel::<Message>();
+    let pong_tx = hb_ping_tx.clone();
+    let last_activity = Arc::new(AtomicU64::new(now_millis()));
+
+    let writer_entry_slug = slug.clone();
+    let writer_handle = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                bytes = control_rx.recv() => match bytes {
+                    Some(b) => {
+                        if let Err(e) = sink.send(Message::Binary(b.into())).await {
+                            tracing::debug!(slug = %writer_entry_slug, error = %e, "control writer error");
+                            break;
+                        }
+                    }
+                    None => break,
+                },
+                ping = hb_ping_rx.recv() => match ping {
+                    Some(msg) => {
+                        if let Err(e) = sink.send(msg).await {
+                            tracing::debug!(slug = %writer_entry_slug, error = %e, "control writer ping error");
+                            break;
+                        }
+                    }
+                    None => break,
+                },
+            }
+        }
+        let _ = sink.send(Message::Close(None)).await;
+    });
+
+    let (hb_handle, mut hb_tripped) =
+        spawn_server_heartbeat(hb_ping_tx, last_activity.clone(), "control");
+
+    // Reader task: dispatch incoming ControlMessages.
+    let reader_entry = entry.clone();
+    'reader: loop {
+        let frame = tokio::select! {
+            frame = stream.next() => frame,
+            _ = &mut hb_tripped => {
+                tracing::warn!(
+                    slug = %reader_entry.slug,
+                    "control tunnel silent >{}s — closing",
+                    HEARTBEAT_TIMEOUT_SECS
+                );
+                break 'reader;
+            }
+        };
+        let Some(frame) = frame else { break 'reader };
+        last_activity.store(now_millis(), Ordering::Relaxed);
+        let bytes = match frame {
+            Ok(Message::Binary(b)) => b,
+            Ok(Message::Text(t)) => t.as_bytes().to_vec().into(),
+            Ok(Message::Close(_)) => break,
+            Ok(Message::Ping(p)) => {
+                // Axum does not auto-reply; mirror the ping back as a
+                // pong so the peer's watchdog stays happy.
+                let _ = pong_tx.send(Message::Pong(p));
+                continue;
+            },
+            Ok(_) => continue,
+            Err(e) => {
+                tracing::debug!(slug = %reader_entry.slug, error = %e, "control reader error");
+                break;
+            },
+        };
+
+        let msg = match decode_control_frame(&bytes) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(slug = %reader_entry.slug, error = %e, "bad control frame");
+                continue;
+            },
+        };
+
+        match msg {
+            ControlMessage::AuthResponse {
+                request_id,
+                client_id,
+                accepted,
+                is_read_only,
+                session_token_hash,
+                e2e_encrypted,
+            } => {
+                let sender = reader_entry
+                    .pending_auths
+                    .lock()
+                    .unwrap()
+                    .remove(&request_id);
+                if let Some(sender) = sender {
+                    let _ = sender.send(AuthResponseResult {
+                        accepted,
+                        client_id,
+                        is_read_only,
+                        session_token_hash,
+                        e2e_encrypted,
+                    });
+                } else {
+                    tracing::warn!(slug = %reader_entry.slug, "AuthResponse for unknown request_id");
+                }
+            },
+            ControlMessage::ControlFrameData { client_id, data } => {
+                let text = match std::str::from_utf8(&data) {
+                    Ok(s) => s.to_owned(),
+                    Err(_) => {
+                        tracing::warn!(
+                            client_id,
+                            "ControlFrameData from Zellij is not UTF-8, dropping"
+                        );
+                        continue;
+                    },
+                };
+                let viewer_ids = reader_entry.viewers_for_client_id(client_id);
+                if viewer_ids.is_empty() {
+                    tracing::debug!(
+                        slug = %reader_entry.slug,
+                        client_id,
+                        "ControlFrameData for unknown client_id, dropping"
+                    );
+                    continue;
+                }
+                let viewers = reader_entry.viewers.lock().unwrap();
+                for vid in viewer_ids {
+                    if let Some(handle) = viewers.get(&vid) {
+                        if let Some(tx) = &handle.control_sink_tx {
+                            let _ = tx.send(Message::Text(text.clone().into()));
+                        }
+                    }
+                }
+            },
+            ControlMessage::SessionSize {
+                client_id,
+                rows,
+                cols,
+            } => {
+                let token_hash = reader_entry
+                    .client_id_to_token_hash
+                    .lock()
+                    .unwrap()
+                    .get(&client_id)
+                    .cloned();
+                let Some(token_hash) = token_hash else {
+                    tracing::debug!(
+                        slug = %reader_entry.slug,
+                        client_id,
+                        "SessionSize for unknown virtual watcher, dropping"
+                    );
+                    continue;
+                };
+                let viewer_ids = {
+                    let mut groups = reader_entry.ro_groups.lock().unwrap();
+                    let Some(group) = groups.get_mut(&token_hash) else {
+                        continue;
+                    };
+                    group.session_size = Some((rows, cols));
+                    group.viewer_ids.iter().copied().collect::<Vec<_>>()
+                };
+                let payload = serde_json::json!({
+                    "type": "SessionSizeChanged",
+                    "rows": rows,
+                    "cols": cols,
+                })
+                .to_string();
+                let viewers = reader_entry.viewers.lock().unwrap();
+                for vid in viewer_ids {
+                    if let Some(handle) = viewers.get(&vid) {
+                        if let Some(tx) = &handle.control_sink_tx {
+                            let _ = tx.send(Message::Text(payload.clone().into()));
+                        }
+                    }
+                }
+            },
+            ControlMessage::ClientDisconnected { client_id } => {
+                // Locate the viewer(s) this `client_id` addresses — r/w
+                // (single viewer) or r/o group (all viewers) — then tear
+                // each of them down through the usual disconnect path.
+                let viewer_ids = reader_entry.viewers_for_client_id(client_id);
+                // For r/o, also drop the cached group so the next viewer
+                // re-challenges rather than joining a zombie group.
+                if let Some(token_hash) = reader_entry
+                    .client_id_to_token_hash
+                    .lock()
+                    .unwrap()
+                    .remove(&client_id)
+                {
+                    if let Some(group) = reader_entry
+                        .ro_groups
+                        .lock()
+                        .unwrap()
+                        .get_mut(&token_hash)
+                    {
+                        group.active_client_id = None;
+                        group.viewer_ids.clear();
+                    }
+                }
+                reader_entry
+                    .client_id_to_viewer
+                    .lock()
+                    .unwrap()
+                    .remove(&client_id);
+                let mut viewers = reader_entry.viewers.lock().unwrap();
+                for vid in viewer_ids {
+                    if let Some(mut handle) = viewers.remove(&vid) {
+                        if let Some(tx) = handle.disconnect_terminal.take() {
+                            let _ = tx.send(());
+                        }
+                        if let Some(tx) = handle.disconnect_control.take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                }
+            },
+            ControlMessage::RevokeToken { token_hash } => {
+                // Tear down any state keyed on this token hash. Covers both
+                // r/o (fan-out group) and r/w (single viewer). Viewers are
+                // forcibly disconnected via their stored oneshots; sessions
+                // are purged so a subsequent cookie-reuse `/session` POST
+                // fails at the resolve step; `client_id_to_token_hash` and
+                // `client_id_to_viewer` are cleaned up so stale ids cannot
+                // be resurrected by frame-dispatch paths.
+                if token_hash.is_empty() {
+                    tracing::warn!(
+                        slug = %reader_entry.slug,
+                        "RevokeToken with empty token_hash, ignoring"
+                    );
+                    continue;
+                }
+
+                let mut viewer_ids_to_disconnect: Vec<Uuid> = Vec::new();
+
+                // r/o path: remove the whole fan-out group, stash every
+                // viewer id for disconnection, drop the virtual watcher
+                // mapping.
+                let removed_group = reader_entry
+                    .ro_groups
+                    .lock()
+                    .unwrap()
+                    .remove(&token_hash);
+                if let Some(group) = removed_group {
+                    if let Some(active_client_id) = group.active_client_id {
+                        reader_entry
+                            .client_id_to_token_hash
+                            .lock()
+                            .unwrap()
+                            .remove(&active_client_id);
+                    }
+                    viewer_ids_to_disconnect.extend(group.viewer_ids);
+                }
+
+                // r/w path + r/o session purge: walk all sessions, collect
+                // those whose token_hash matches. For r/w sessions, drop
+                // the client_id_to_viewer mapping too.
+                let matching_session_ids: Vec<Uuid> = {
+                    let sessions = reader_entry.sessions.lock().unwrap();
+                    sessions
+                        .iter()
+                        .filter(|(_, s)| s.token_hash == token_hash)
+                        .map(|(sid, _)| *sid)
+                        .collect()
+                };
+                {
+                    let mut sessions = reader_entry.sessions.lock().unwrap();
+                    for sid in &matching_session_ids {
+                        if let Some(session) = sessions.remove(sid) {
+                            viewer_ids_to_disconnect.push(session.viewer_id);
+                            if let ViewerRouting::Rw(client_id) = session.routing {
+                                reader_entry
+                                    .client_id_to_viewer
+                                    .lock()
+                                    .unwrap()
+                                    .remove(&client_id);
+                            }
+                        }
+                    }
+                }
+
+                // Fire disconnect oneshots for every resolved viewer id.
+                let mut viewers = reader_entry.viewers.lock().unwrap();
+                let disconnected = viewer_ids_to_disconnect.len();
+                for vid in viewer_ids_to_disconnect {
+                    if let Some(mut handle) = viewers.remove(&vid) {
+                        if let Some(tx) = handle.disconnect_terminal.take() {
+                            let _ = tx.send(());
+                        }
+                        if let Some(tx) = handle.disconnect_control.take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                }
+                tracing::info!(
+                    slug = %reader_entry.slug,
+                    disconnected,
+                    "RevokeToken: torn down viewers for token hash"
+                );
+            },
+            ControlMessage::Error { message } => {
+                tracing::warn!(slug = %reader_entry.slug, %message, "relay-peer control error");
+            },
+            other => {
+                tracing::warn!(slug = %reader_entry.slug, ?other, "unexpected control frame after handshake");
+            },
+        }
+    }
+
+    // Tunnel closing: drop registry entry and force-close all viewers.
+    if let Some(removed) = state.registry.remove(&reader_entry.slug) {
+        let mut viewers = removed.viewers.lock().unwrap();
+        for (_client_id, mut handle) in viewers.drain() {
+            if let Some(tx) = handle.disconnect_terminal.take() {
+                let _ = tx.send(());
+            }
+            if let Some(tx) = handle.disconnect_control.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+    writer_handle.abort();
+    hb_handle.abort();
+    tracing::info!(slug = %reader_entry.slug, "tunnel closed");
+}
+
+async fn send_error(socket: &mut WebSocket, message: &str) -> anyhow::Result<()> {
+    let frame = ControlMessage::Error {
+        message: message.to_string(),
+    };
+    socket
+        .send(Message::Binary(frame.encode().into()))
+        .await
+        .map_err(Into::into)
+}

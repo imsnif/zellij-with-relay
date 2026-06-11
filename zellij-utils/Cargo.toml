@@ -70,6 +70,7 @@ dunce = "1.0"
 [dev-dependencies]
 insta = { version = "1.6.0", features = ["backtrace"] }
 expect-test = "1.4.1"
+serial_test = "3.0"
 
 [features]
 # If this feature is NOT set (default):

@@ -15,8 +15,8 @@ rust-version.workspace = true
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-zellij-client = { path = "zellij-client/", version = "0.45.0" }
-zellij-server = { path = "zellij-server/", version = "0.45.0" }
+zellij-client = { path = "zellij-client/", version = "0.44.2" }
+zellij-server = { path = "zellij-server/", version = "0.44.2" }
 zellij-utils = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
@@ -65,6 +65,10 @@ members = [
     "zellij-utils",
     "zellij-tile",
     "zellij-tile-utils",
+    "zellij-relay-protocol",
+    "zellij-relay",
+    "zellij-ansi-clip",
+    "zellij-web-client-assets",
     "xtask",
     ".",
 ]
@@ -73,7 +77,7 @@ members = [
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/zellij-org/zellij"
-version = "0.45.0"
+version = "0.44.2"
 # NOTE: When updating this, modify `channel` in `rust-toolchain.toml` accordingly
 rust-version = "1.92"
 
@@ -117,7 +121,13 @@ windows-sys = { version = "0.59", default-features = false }
 names = { version = "0.14.0", default-features = false }
 include_dir = { version = "0.7.3", default-features = false }
 sha2 = { version = "0.10", default-features = false }
-zellij-utils = { path = "zellij-utils/", version = "0.45.0" }
+hkdf = { version = "0.12", default-features = false }
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
+zellij-utils = { path = "zellij-utils/", version = "0.44.2" }
+zellij-relay-protocol = { path = "zellij-relay-protocol/", version = "0.44.2" }
+zellij-web-client-assets = { path = "zellij-web-client-assets/", version = "0.44.2" }
+zellij-ansi-clip = { path = "zellij-ansi-clip/", version = "0.44.2", default-features = false }
 
 [profile.dev-opt]
 inherits = "dev"
@@ -152,8 +162,15 @@ pkg-fmt = "tgz"
 
 [features]
 # See remarks in zellij_utils/Cargo.toml
-default = ["plugins_from_target", "vendored_curl", "web_server_capability"]
+default = ["plugins_from_target", "clip_wasm_from_target", "vendored_curl", "web_server_capability"]
 plugins_from_target = ["zellij-utils/plugins_from_target"]
+# When set, `zellij-web-client-assets` bundles the live
+# `target/wasm32-unknown-unknown/release/zellij_ansi_clip.wasm` build artefact
+# instead of the committed `zellij-web-client-assets/assets/clip.wasm`, so
+# edits to `zellij-ansi-clip` land in the running binary without requiring a
+# commit. Mirrors the `plugins_from_target` pattern. `cargo x build` /
+# `cargo x run` rebuild the artefact to the expected path on every invocation.
+clip_wasm_from_target = ["zellij-client/clip_wasm_from_target"]
 disable_automatic_asset_installation = ["zellij-utils/disable_automatic_asset_installation"]
 vendored_curl = ["zellij-utils/vendored_curl"]
 unstable = ["zellij-client/unstable", "zellij-utils/unstable"]

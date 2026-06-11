@@ -32,6 +32,7 @@ pub fn make(sh: &Shell, flags: flags::Make) -> anyhow::Result<()> {
                     no_plugins: false,
                     plugins_only: false,
                     no_web: flags.no_web,
+                    wasm_clip: false,
                 },
             )
         })
@@ -67,6 +68,7 @@ pub fn install(sh: &Shell, flags: flags::Install) -> anyhow::Result<()> {
             no_plugins: false,
             plugins_only: true,
             no_web: flags.no_web,
+            wasm_clip: false,
         },
     )
     .and_then(|_| {
@@ -78,6 +80,7 @@ pub fn install(sh: &Shell, flags: flags::Install) -> anyhow::Result<()> {
                 no_plugins: true,
                 plugins_only: false,
                 no_web: flags.no_web,
+                wasm_clip: false,
             },
         )
     })
@@ -148,6 +151,7 @@ pub fn run(sh: &Shell, mut flags: flags::Run) -> anyhow::Result<()> {
                 no_plugins: false,
                 plugins_only: true,
                 no_web: flags.no_web,
+                wasm_clip: false,
             },
         )
         .and_then(|_| crate::cargo())
@@ -323,9 +327,33 @@ pub fn publish(sh: &Shell, flags: flags::Publish) -> anyhow::Result<()> {
                 no_plugins: false,
                 plugins_only: true,
                 no_web: false,
+                wasm_clip: false,
             },
         )
         .context(err_context)?;
+
+        // Build the ansi-clip wasm blob. The resulting
+        // `zellij-web-client-assets/assets/clip.wasm` is picked up by the
+        // `git commit -aem` below and shipped alongside the plugin wasm.
+        build::build(
+            sh,
+            flags::Build {
+                release: true,
+                no_plugins: true,
+                plugins_only: false,
+                no_web: true,
+                wasm_clip: true,
+            },
+        )
+        .context(err_context)?;
+
+        // Snapshot the freshly-baked web-client assets (including the
+        // clip.wasm produced just above) into the versioned relay tree
+        // at `zellij-relay/assets/<version>/`. The git commit below
+        // captures this directory in the same release commit, so every
+        // tagged release leaves a frozen bundle behind for the relay to
+        // serve to older Zellij clients that attach later.
+        build::snapshot_web_assets_for_relay(sh, version).context(err_context)?;
 
         // Update default config
         sh.copy_file(

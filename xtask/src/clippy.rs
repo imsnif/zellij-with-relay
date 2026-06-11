@@ -14,6 +14,7 @@ pub fn clippy(sh: &Shell, _flags: flags::Clippy) -> anyhow::Result<()> {
             no_plugins: false,
             plugins_only: true,
             no_web: false,
+            wasm_clip: false,
         },
     )
     .context("failed to run task 'clippy'")?;

@@ -37,4 +37,5 @@ body {
     overflow: hidden;
     overscroll-behavior: contain;
     touch-action: pan-y;
+    background: #000;
 }

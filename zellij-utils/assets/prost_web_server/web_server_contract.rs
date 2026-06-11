@@ -1,7 +1,7 @@
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct InstructionForWebServer {
-    #[prost(oneof="instruction_for_web_server::Instruction", tags="1, 2")]
+    #[prost(oneof="instruction_for_web_server::Instruction", tags="1, 2, 3, 4, 5, 6")]
     pub instruction: ::core::option::Option<instruction_for_web_server::Instruction>,
 }
 /// Nested message and enum types in `InstructionForWebServer`.
@@ -11,12 +11,26 @@ pub mod instruction_for_web_server {
     pub enum Instruction {
         #[prost(message, tag="1")]
         ShutdownWebServer(super::ShutdownWebServerMsg),
-        /// Future commands can be added here
-        /// RestartWebServerMsg restart_web_server = 3;
-        /// ReloadConfigMsg reload_config = 4;
         #[prost(message, tag="2")]
         QueryVersion(super::QueryVersionMsg),
+        #[prost(message, tag="3")]
+        StartRelayTunnel(super::StartRelayTunnelMsg),
+        #[prost(message, tag="4")]
+        StopRelayTunnel(super::StopRelayTunnelMsg),
+        #[prost(message, tag="5")]
+        GetRelayTunnelStatus(super::GetRelayTunnelStatusMsg),
+        #[prost(message, tag="6")]
+        RevokeRelayToken(super::RevokeRelayTokenMsg),
     }
+}
+/// Phase 6 Session C: propagate a viewer-token revocation from the Zellij
+/// server process into the web-server process, so it can be forwarded to
+/// every active relay tunnel.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RevokeRelayTokenMsg {
+    #[prost(string, tag="1")]
+    pub token_hash: ::prost::alloc::string::String,
 }
 /// Empty for now, but allows for future parameters like graceful timeout
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -29,8 +43,40 @@ pub struct QueryVersionMsg {
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct StartRelayTunnelMsg {
+    #[prost(uint32, tag="1")]
+    pub client_id: u32,
+    #[prost(string, tag="2")]
+    pub session_name: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub relay_url: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub zellij_version: ::prost::alloc::string::String,
+    /// Phase 6 Session C: shared-secret tunnel-auth token. Empty string
+    /// means "not configured"; the relay rejects with
+    /// `TunnelError { message: "relay tunnel auth rejected" }`.
+    #[prost(string, tag="5")]
+    pub relay_tunnel_auth_token: ::prost::alloc::string::String,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct StopRelayTunnelMsg {
+    #[prost(uint32, tag="1")]
+    pub client_id: u32,
+}
+/// Phase 6 (Session A): poll the relay tunnel's current status. Returns
+/// `RelayTunnelStatusReport` with a sentinel-encoded `status_url` that the
+/// share plugin decodes for connected / reconnecting / failed rendering.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetRelayTunnelStatusMsg {
+    #[prost(uint32, tag="1")]
+    pub client_id: u32,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct WebServerResponse {
-    #[prost(oneof="web_server_response::Response", tags="1")]
+    #[prost(oneof="web_server_response::Response", tags="1, 2, 3, 4, 5")]
     pub response: ::core::option::Option<web_server_response::Response>,
 }
 /// Nested message and enum types in `WebServerResponse`.
@@ -40,6 +86,14 @@ pub mod web_server_response {
     pub enum Response {
         #[prost(message, tag="1")]
         Version(super::VersionResponseMsg),
+        #[prost(message, tag="2")]
+        RelayTunnelEstablished(super::RelayTunnelEstablishedMsg),
+        #[prost(message, tag="3")]
+        RelayTunnelStopped(super::RelayTunnelStoppedMsg),
+        #[prost(message, tag="4")]
+        RelayTunnelError(super::RelayTunnelErrorMsg),
+        #[prost(message, tag="5")]
+        RelayTunnelStatusReport(super::RelayTunnelStatusReportMsg),
     }
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -51,4 +105,42 @@ pub struct VersionResponseMsg {
     pub ip: ::prost::alloc::string::String,
     #[prost(uint32, tag="3")]
     pub port: u32,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RelayTunnelEstablishedMsg {
+    #[prost(uint32, tag="1")]
+    pub client_id: u32,
+    #[prost(string, tag="2")]
+    pub public_url: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub slug: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub tunnel_id: ::prost::alloc::string::String,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RelayTunnelStoppedMsg {
+    #[prost(uint32, tag="1")]
+    pub client_id: u32,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RelayTunnelErrorMsg {
+    #[prost(uint32, tag="1")]
+    pub client_id: u32,
+    #[prost(string, tag="2")]
+    pub message: ::prost::alloc::string::String,
+}
+/// Phase 6 (Session A): result of `GetRelayTunnelStatusMsg`. `status_url`
+/// is either a live public URL, `__RELAY_RECONNECTING__:<attempt>`, or
+/// `__RELAY_FAILED__:<message>`. Empty string when no tunnel exists for
+/// this client.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RelayTunnelStatusReportMsg {
+    #[prost(uint32, tag="1")]
+    pub client_id: u32,
+    #[prost(string, tag="2")]
+    pub status_url: ::prost::alloc::string::String,
 }

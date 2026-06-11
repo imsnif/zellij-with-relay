@@ -215,6 +215,7 @@ impl From<ServerToClientMsg> for ClientInstruction {
             ServerToClientMsg::PaneRenderUpdate { .. } => ClientInstruction::UnblockInputThread,
             ServerToClientMsg::SubscribedPaneClosed { .. } => ClientInstruction::UnblockInputThread,
             ServerToClientMsg::SetSoftKeyboard { .. } => ClientInstruction::UnblockInputThread,
+            ServerToClientMsg::SessionSize { .. } => ClientInstruction::UnblockInputThread,
         }
     }
 }
@@ -445,8 +446,38 @@ pub(crate) enum InputInstruction {
 #[cfg(feature = "web_server_capability")]
 pub async fn run_remote_client_terminal_loop(
     os_input: Box<dyn ClientOsApi>,
-    mut connections: remote_attach::WebSocketConnections,
+    attached: remote_attach::AttachedSession,
 ) -> Result<Option<ConnectToSession>, RemoteClientError> {
+    let mut connections = attached.connections;
+    let e2e_key = attached.e2e_key;
+    // Phase 5: on r/o attach the terminal stream is clipped to the
+    // local viewport rather than written out raw, and STDIN / outbound
+    // resizes are suppressed (the relay drops the former at its side,
+    // and the sharer's viewport is authoritative for size).
+    let is_read_only = attached.is_read_only;
+    // `0` is the relay's cold-start sentinel for fresh r/o fan-out
+    // groups whose `SessionSize` has not yet been observed. Mirrors
+    // the browser's `sessionRows || 24` / `sessionCols || 80` default
+    // (`zellij-web-client-assets/assets/websockets.js:44`). The first
+    // `SessionSizeChanged` from the relay corrects these.
+    let initial_session_rows: u16 = if attached.session_rows == 0 {
+        24
+    } else {
+        attached.session_rows as u16
+    };
+    let initial_session_cols: u16 = if attached.session_cols == 0 {
+        80
+    } else {
+        attached.session_cols as u16
+    };
+    let mut clipper: Option<zellij_ansi_clip::ClipState> = if is_read_only {
+        Some(zellij_ansi_clip::ClipState::new(
+            initial_session_rows,
+            initial_session_cols,
+        ))
+    } else {
+        None
+    };
     use crate::os_input_output::{AsyncSignals, AsyncStdin};
 
     let synchronised_output = match os_input.env_variable("TERM").as_deref() {
@@ -469,23 +500,79 @@ pub async fn run_remote_client_terminal_loop(
         )
     };
 
-    // send size on startup
-    let new_size = os_input.get_terminal_size();
-    if let Err(e) = connections
-        .control_ws
-        .send(create_resize_message(new_size))
-        .await
-    {
-        log::error!("Failed to send resize message: {}", e);
+    // send size on startup (r/w only — r/o viewers do not propagate
+    // their viewport; the sharer's session size is authoritative and
+    // flows in the opposite direction as `SessionSizeChanged`).
+    if !is_read_only {
+        let new_size = os_input.get_terminal_size();
+        if let Err(e) = connections
+            .control_ws
+            .send(create_resize_message(new_size))
+            .await
+        {
+            log::error!("Failed to send resize message: {}", e);
+        }
     }
+
+    // Phase 3 client-commitment rule: under E2E, no STDIN byte may be
+    // transmitted before at least one server frame has decrypted
+    // cleanly. We gate the stdin branch of the select below on this
+    // flag; in the non-E2E path it starts unlocked. Stdin back-pressure
+    // is handled naturally — the tokio::select! branch simply becomes
+    // uninterested in the stdin future until the flag flips.
+    // Phase 5: r/o viewers must never send STDIN, so the flag starts
+    // locked and never flips for them.
+    let mut stdin_unlocked = e2e_key.is_none() && !is_read_only;
+
+    // Phase 6 (Session A): heartbeat on both WS legs. `heartbeat_ticker`
+    // fires every 15s; a full ping cadence is every 30s (two ticks) and
+    // the watchdog trips when either leg has been silent > 60s.
+    const ATTACH_HEARTBEAT_INTERVAL_SECS: u64 = 30;
+    const ATTACH_HEARTBEAT_TIMEOUT_SECS: u64 = 60;
+    let mut heartbeat_ticker = tokio::time::interval(std::time::Duration::from_secs(
+        ATTACH_HEARTBEAT_INTERVAL_SECS / 2,
+    ));
+    heartbeat_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    heartbeat_ticker.tick().await; // burn first immediate tick
+    let mut heartbeat_tick_count: u32 = 0;
+    let now_ms = || -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    };
+    let mut last_terminal_activity_ms = now_ms();
+    let mut last_control_activity_ms = now_ms();
 
     loop {
         tokio::select! {
-            // Handle stdin input
-            result = async_stdin.read() => {
+            // Handle stdin input (gated under E2E until first clean decrypt;
+            // r/o viewers never transmit so the arm is permanently closed).
+            result = async_stdin.read(), if stdin_unlocked && !is_read_only => {
                 match result {
                     Ok(buf) if !buf.is_empty() => {
-                        if let Err(e) = connections.terminal_ws.send(Message::Binary(buf)).await {
+                        // Defense-in-depth: the `if` guard above already
+                        // closes this arm on r/o. The relay also drops r/o
+                        // input before it reaches Zellij. Drop-and-continue
+                        // here is the belt over the braces.
+                        if is_read_only {
+                            continue;
+                        }
+                        // With E2E on, encrypt before sending; the server
+                        // decrypts with the same key it derived at auth
+                        // time. See `derive_e2e_key_if_needed` for the
+                        // key material.
+                        let payload = match &e2e_key {
+                            Some(k) => match zellij_relay_protocol::crypto::encrypt(k, &buf) {
+                                Ok(ct) => ct,
+                                Err(err) => {
+                                    log::error!("e2e encrypt failed: {} — dropping stdin chunk", err);
+                                    continue;
+                                }
+                            },
+                            None => buf,
+                        };
+                        if let Err(e) = connections.terminal_ws.send(Message::Binary(payload)).await {
                             log::error!("Failed to send stdin to terminal WebSocket: {}", e);
                             break;
                         }
@@ -506,7 +593,33 @@ pub async fn run_remote_client_terminal_loop(
                 match signal {
                     crate::os_input_output::SignalEvent::Resize => {
                         let new_size = os_input.get_terminal_size();
-                        if let Err(e) = connections.control_ws.send(create_resize_message(new_size)).await {
+                        if is_read_only {
+                            // R/O: re-clip the cached session frame to
+                            // the new local viewport and paint it.
+                            // Zero outbound traffic. Mirrors the browser
+                            // path in `websockets.js::setupResizeHandler`.
+                            if let Some(clip) = clipper.as_mut() {
+                                let emitted = clip.emit(
+                                    new_size.rows as u16,
+                                    new_size.cols as u16,
+                                );
+                                let mut stdout = os_input.get_stdout_writer();
+                                if let Some(sync) = synchronised_output {
+                                    stdout
+                                        .write_all(sync.start_seq())
+                                        .expect("cannot write to stdout");
+                                }
+                                stdout
+                                    .write_all(&emitted)
+                                    .expect("cannot write to stdout");
+                                if let Some(sync) = synchronised_output {
+                                    stdout
+                                        .write_all(sync.end_seq())
+                                        .expect("cannot write to stdout");
+                                }
+                                stdout.flush().expect("could not flush");
+                            }
+                        } else if let Err(e) = connections.control_ws.send(create_resize_message(new_size)).await {
                             log::error!("Failed to send resize message: {}", e);
                             break;
                         }
@@ -517,10 +630,62 @@ pub async fn run_remote_client_terminal_loop(
                 }
             }
 
+            // Phase 6 (Session A): heartbeat tick. On every full cadence
+            // emit a Ping on both sockets; on every half-cadence check
+            // the silence budget. Tungstenite auto-replies to Pings
+            // from the remote peer, so inbound Pong frames show up in
+            // the terminal/control arms below and refresh the activity
+            // timestamps.
+            _ = heartbeat_ticker.tick() => {
+                heartbeat_tick_count += 1;
+                if u64::from(heartbeat_tick_count) * (ATTACH_HEARTBEAT_INTERVAL_SECS / 2)
+                    >= ATTACH_HEARTBEAT_INTERVAL_SECS
+                {
+                    heartbeat_tick_count = 0;
+                    let payload = b"hb".to_vec();
+                    if connections
+                        .terminal_ws
+                        .send(Message::Ping(payload.clone()))
+                        .await
+                        .is_err()
+                    {
+                        log::warn!("attach heartbeat: terminal ws send failed");
+                        break;
+                    }
+                    if connections
+                        .control_ws
+                        .send(Message::Ping(payload))
+                        .await
+                        .is_err()
+                    {
+                        log::warn!("attach heartbeat: control ws send failed");
+                        break;
+                    }
+                }
+                let now = now_ms();
+                if now.saturating_sub(last_terminal_activity_ms)
+                    > ATTACH_HEARTBEAT_TIMEOUT_SECS * 1000
+                    || now.saturating_sub(last_control_activity_ms)
+                        > ATTACH_HEARTBEAT_TIMEOUT_SECS * 1000
+                {
+                    log::warn!(
+                        "attach heartbeat: watchdog tripped (terminal silent {}ms, control silent {}ms)",
+                        now.saturating_sub(last_terminal_activity_ms),
+                        now.saturating_sub(last_control_activity_ms)
+                    );
+                    break;
+                }
+            }
+
             // Handle terminal messages
             terminal_msg = connections.terminal_ws.next() => {
+                last_terminal_activity_ms = now_ms();
                 match terminal_msg {
                     Some(Ok(Message::Text(text))) => {
+                        if e2e_key.is_some() {
+                            log::warn!("got plaintext Text frame under E2E — dropping");
+                            continue;
+                        }
                         let mut stdout = os_input.get_stdout_writer();
                         if let Some(sync) = synchronised_output {
                             stdout
@@ -538,6 +703,38 @@ pub async fn run_remote_client_terminal_loop(
                         stdout.flush().expect("could not flush");
                     }
                     Some(Ok(Message::Binary(data))) => {
+                        // With E2E on, the server sends ciphertext as
+                        // Binary. Decrypt into the plaintext ANSI stream
+                        // before writing to stdout.
+                        let decrypted: Vec<u8> = match &e2e_key {
+                            Some(k) => match zellij_relay_protocol::crypto::decrypt(k, &data) {
+                                Ok(pt) => pt,
+                                Err(err) => {
+                                    log::warn!("e2e decrypt failed: {} — dropping frame", err);
+                                    continue;
+                                }
+                            },
+                            None => data,
+                        };
+                        // First clean decrypt under E2E unlocks stdin
+                        // transmission. In the non-E2E path this is a
+                        // no-op — the flag started `true`. R/O viewers
+                        // never unlock (the STDIN arm is gated
+                        // independently on `!is_read_only`).
+                        stdin_unlocked = true;
+                        // Phase 5: on r/o, feed the decrypted ANSI into
+                        // the viewport clipper and emit a normalised
+                        // stream sized for this viewer. On r/w (or
+                        // non-relay web clients) write the decrypted
+                        // bytes verbatim. Mirrors the browser path in
+                        // `websockets.js::wsTerminal.onmessage`.
+                        let output: Vec<u8> = if let Some(clip) = clipper.as_mut() {
+                            clip.apply_chunk(&decrypted);
+                            let term_size = os_input.get_terminal_size();
+                            clip.emit(term_size.rows as u16, term_size.cols as u16)
+                        } else {
+                            decrypted
+                        };
                         let mut stdout = os_input.get_stdout_writer();
                         if let Some(sync) = synchronised_output {
                             stdout
@@ -545,7 +742,7 @@ pub async fn run_remote_client_terminal_loop(
                                 .expect("cannot write to stdout");
                         }
                         stdout
-                            .write_all(&data)
+                            .write_all(&output)
                             .expect("cannot write to stdout");
                         if let Some(sync) = synchronised_output {
                             stdout
@@ -570,6 +767,7 @@ pub async fn run_remote_client_terminal_loop(
             }
 
             control_msg = connections.control_ws.next() => {
+                last_control_activity_ms = now_ms();
                 match control_msg {
                     Some(Ok(Message::Text(msg))) => {
                         let deserialized_msg: Result<WebServerToWebClientControlMessage, _> =
@@ -600,6 +798,38 @@ pub async fn run_remote_client_terminal_loop(
                             Ok(WebServerToWebClientControlMessage::SetSoftKeyboard{ .. }) => {
                                 // no-op
                             }
+                            Ok(WebServerToWebClientControlMessage::SessionSizeChanged { rows, cols }) => {
+                                // Phase 5: r/o viewers resize the clipper's
+                                // virtual session grid and repaint. Mirrors
+                                // the browser handler in
+                                // `websockets.js::startWsControl`'s
+                                // `SessionSizeChanged` branch. r/w viewers
+                                // ignore the message (the sharer does not
+                                // receive size updates from itself).
+                                if let Some(clip) = clipper.as_mut() {
+                                    clip.resize_session(rows as u16, cols as u16);
+                                    let term_size = os_input.get_terminal_size();
+                                    let emitted = clip.emit(
+                                        term_size.rows as u16,
+                                        term_size.cols as u16,
+                                    );
+                                    let mut stdout = os_input.get_stdout_writer();
+                                    if let Some(sync) = synchronised_output {
+                                        stdout
+                                            .write_all(sync.start_seq())
+                                            .expect("cannot write to stdout");
+                                    }
+                                    stdout
+                                        .write_all(&emitted)
+                                        .expect("cannot write to stdout");
+                                    if let Some(sync) = synchronised_output {
+                                        stdout
+                                            .write_all(sync.end_seq())
+                                            .expect("cannot write to stdout");
+                                    }
+                                    stdout.flush().expect("could not flush");
+                                }
+                            }
                             Err(e) => {
                                 log::error!("Failed to deserialize control message: {}", e);
                             }
@@ -624,6 +854,12 @@ pub async fn run_remote_client_terminal_loop(
     Ok(None)
 }
 
+/// Attach to a remote Zellij session given its URL.
+///
+/// `extra_relay_urls` should carry the local `relay_server_url` config
+/// (if any) plus any other trusted relay URLs. Hosts extracted from
+/// these are appended to the hard-coded `zellij.dev` known-relay list
+/// so self-hosted setups get the same downgrade-refusal treatment.
 #[cfg(feature = "web_server_capability")]
 pub fn start_remote_client(
     mut os_input: Box<dyn ClientOsApi>,
@@ -634,6 +870,7 @@ pub fn start_remote_client(
     ca_cert: Option<std::path::PathBuf>,
     insecure: bool,
     async_worker_tasks: Option<usize>,
+    extra_relay_urls: Vec<String>,
 ) -> Result<Option<ConnectToSession>, RemoteClientError> {
     info!("Starting Zellij client!");
 
@@ -648,6 +885,7 @@ pub fn start_remote_client(
         forget,
         ca_cert.as_deref(),
         insecure,
+        &extra_relay_urls,
     )?;
 
     let reconnect_to_session = None;

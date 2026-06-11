@@ -138,6 +138,9 @@ pub enum ClientToServerMsg {
         terminal_size: Size,
         is_web_client: bool,
     },
+    AttachRelayWatcherClient {
+        is_web_client: bool,
+    },
     Action {
         action: Action,
         terminal_id: Option<u32>,
@@ -226,6 +229,10 @@ pub enum ServerToClientMsg {
     ForwardQueryToHost {
         token: u32,
         query_bytes: Vec<u8>,
+    },
+    SessionSize {
+        rows: u32,
+        cols: u32,
     },
 }
 

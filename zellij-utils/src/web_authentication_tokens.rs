@@ -227,6 +227,24 @@ pub fn validate_session_token(session_token: &str) -> Result<bool> {
     Ok(count > 0)
 }
 
+/// Look up the `auth_token_hash` associated with a session token. Used by
+/// the E2E key-derivation path so the Zellij web server can derive the
+/// same key the browser derives from the raw auth token it typed in.
+pub fn get_auth_token_hash_for_session(session_token: &str) -> Result<Option<String>> {
+    let conn = open_db()?;
+    let session_token_hash = hash_token(session_token);
+    match conn.query_row(
+        "SELECT auth_token_hash FROM session_tokens
+         WHERE session_token_hash = ?1 AND expires_at > datetime('now')",
+        [&session_token_hash],
+        |row| row.get::<_, String>(0),
+    ) {
+        Ok(hash) => Ok(Some(hash)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(TokenError::Database(e)),
+    }
+}
+
 pub fn is_session_token_read_only(session_token: &str) -> Result<bool> {
     let conn = open_db()?;
 
@@ -284,6 +302,14 @@ pub fn revoke_sessions_for_auth_token(auth_token: &str) -> Result<usize> {
 }
 
 pub fn revoke_token(name: &str) -> Result<bool> {
+    revoke_token_and_return_hash(name).map(|opt| opt.is_some())
+}
+
+/// Like `revoke_token` but returns the SHA-256 hash of the just-revoked
+/// auth token so callers can propagate the revocation (e.g. via the
+/// relay tunnel's `RevokeToken` control frame). Returns `Ok(None)` if
+/// no token with `name` existed.
+pub fn revoke_token_and_return_hash(name: &str) -> Result<Option<String>> {
     let mut conn = open_db()?;
 
     let tx = conn.transaction().map_err(TokenError::Database)?;
@@ -298,16 +324,20 @@ pub fn revoke_token(name: &str) -> Result<bool> {
         Err(e) => return Err(TokenError::Database(e)),
     };
 
-    if let Some(token_hash) = token_hash {
+    if let Some(token_hash) = &token_hash {
         tx.execute(
             "DELETE FROM session_tokens WHERE auth_token_hash = ?1",
-            [&token_hash],
+            [token_hash],
         )?;
     }
 
     let rows_affected = tx.execute("DELETE FROM tokens WHERE name = ?1", [&name])?;
     tx.commit().map_err(TokenError::Database)?;
-    Ok(rows_affected > 0)
+    if rows_affected > 0 {
+        Ok(token_hash)
+    } else {
+        Ok(None)
+    }
 }
 
 pub fn revoke_all_tokens() -> Result<usize> {
@@ -386,4 +416,61 @@ pub fn validate_token(token: &str) -> Result<bool> {
         |row| row.get(0),
     )?;
     Ok(count > 0)
+}
+
+/// Validate a pre-hashed auth token, returning the stored read-only flag if the
+/// hash matches a known auth token. Used by the relay tunnel path, which only
+/// ever receives the hash on the wire and cannot re-derive the raw token.
+pub fn validate_auth_token_hash(hash: &str) -> Result<Option<bool>> {
+    let conn = open_db()?;
+
+    match conn.query_row(
+        "SELECT read_only FROM tokens WHERE token_hash = ?1",
+        [&hash],
+        |row| row.get::<_, i64>(0),
+    ) {
+        Ok(read_only) => Ok(Some(read_only != 0)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(TokenError::Database(e)),
+    }
+}
+
+#[cfg(test)]
+mod validate_auth_token_hash_tests {
+    use super::*;
+    use serial_test::serial;
+
+    fn reset_db() {
+        let _ = delete_db();
+    }
+
+    #[test]
+    #[serial]
+    fn miss_returns_none() {
+        reset_db();
+        // Open DB to ensure schema is initialised.
+        let _ = open_db().unwrap();
+        let result = validate_auth_token_hash("deadbeef").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn hit_returns_read_only_flag_for_rw_token() {
+        reset_db();
+        let (raw, _name) = create_token(Some("rw_test".into()), false).unwrap();
+        let hash = hash_token(&raw);
+        let result = validate_auth_token_hash(&hash).unwrap();
+        assert_eq!(result, Some(false));
+    }
+
+    #[test]
+    #[serial]
+    fn hit_returns_read_only_flag_for_ro_token() {
+        reset_db();
+        let (raw, _name) = create_token(Some("ro_test".into()), true).unwrap();
+        let hash = hash_token(&raw);
+        let result = validate_auth_token_hash(&hash).unwrap();
+        assert_eq!(result, Some(true));
+    }
 }

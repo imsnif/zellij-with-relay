@@ -4,11 +4,19 @@ use axum::http::header::SET_COOKIE;
 use axum::{extract::Request, http::StatusCode, middleware::Next, response::Response};
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use zellij_utils::web_authentication_tokens::{
-    hash_token, is_session_token_read_only, validate_session_token,
+    get_auth_token_hash_for_session, hash_token, is_session_token_read_only,
+    validate_session_token,
 };
 
 #[derive(Clone)]
 pub struct SessionTokenHash(pub String);
+
+/// Hash of the auth token that backs the current session. Distinct from
+/// `SessionTokenHash` (which hashes the session-cookie UUID). Used as HKDF
+/// key material for the E2E opt-in, because the browser derives the same
+/// hash from the raw auth token the user typed.
+#[derive(Clone)]
+pub struct AuthTokenHash(pub String);
 
 #[derive(Clone, Copy)]
 pub struct IsReadOnly(pub bool);
@@ -29,12 +37,27 @@ pub async fn auth_middleware(request: Request, next: Next) -> Result<Response, S
             // Compute session token hash for client ownership verification
             let session_token_hash = hash_token(&session_token);
 
+            // Look up the underlying auth-token hash for E2E key derivation.
+            // Missing is logged but does not block the request — the /session
+            // handler falls back to plaintext when the option is off anyway.
+            let auth_token_hash = match get_auth_token_hash_for_session(&session_token) {
+                Ok(Some(h)) => Some(h),
+                Ok(None) => None,
+                Err(e) => {
+                    log::warn!("failed to look up auth_token_hash: {}", e);
+                    None
+                },
+            };
+
             // Store in request extensions for downstream handlers
             let mut request = request;
             request.extensions_mut().insert(IsReadOnly(is_read_only));
             request
                 .extensions_mut()
                 .insert(SessionTokenHash(session_token_hash));
+            if let Some(h) = auth_token_hash {
+                request.extensions_mut().insert(AuthTokenHash(h));
+            }
 
             let response = next.run(request).await;
             Ok(response)

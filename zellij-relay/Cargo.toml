@@ -1,0 +1,44 @@
+[package]
+name = "zellij-relay"
+version.workspace = true
+authors = ["Aram Drevekenin <aram@poor.dev>"]
+edition.workspace = true
+description = "Relay server for Zellij remote session sharing"
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { version = "0.8.4", features = ["ws"] }
+axum-extra = { version = "0.10.1", features = ["cookie"] }
+futures-util = "0.3"
+include_dir = { workspace = true }
+log = { workspace = true }
+prost = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+directories = { version = "5.0", default-features = false }
+rand = "0.8"
+rusqlite = { version = "0.30", default-features = false, features = ["bundled"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { workspace = true }
+zellij-relay-protocol = { workspace = true }
+zellij-web-client-assets = { workspace = true }
+
+[dev-dependencies]
+serial_test = "3.0"
+tokio-tungstenite = "0.20"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies"] }
+
+[features]
+# Bundle the live `target/` clip.wasm build artefact instead of the
+# committed one. Useful during iteration — avoids a commit after every
+# edit to `zellij-ansi-clip`. Mirrors the cascade in the root crate.
+clip_wasm_from_target = ["zellij-web-client-assets/clip_wasm_from_target"]
+
+[[bin]]
+name = "zellij-relay"
+path = "src/main.rs"

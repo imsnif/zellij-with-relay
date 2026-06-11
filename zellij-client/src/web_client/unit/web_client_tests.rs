@@ -462,6 +462,12 @@ mod web_client_tests {
     #[tokio::test]
     #[serial]
     async fn test_terminal_metrics_translates_to_pixel_dimensions() {
+        // Simulates a browser sending a TerminalMetrics control message
+        // (the payload our websockets.js sendTerminalMetrics() helper
+        // produces) and verifies the web server translates it into
+        // ClientToServerMsg::TerminalPixelDimensions with field-for-field
+        // accuracy. This guards the wire-format contract end-to-end
+        // through serde + the match arm in websocket_handlers.rs.
         let _ = delete_db();
 
         let test_token_name = "test_token_terminal_metrics";
@@ -554,6 +560,7 @@ mod web_client_tests {
             serde_json::from_str(&client_response.text().unwrap()).unwrap();
         let web_client_id = client_data["web_client_id"].as_str().unwrap().to_string();
 
+        // Open the control WebSocket and consume the initial SetConfig.
         let control_ws_url = format!("ws://127.0.0.1:{}/ws/control", port);
         let (control_ws, _) = timeout(
             Duration::from_secs(5),
@@ -567,6 +574,9 @@ mod web_client_tests {
             .await
             .expect("Timeout waiting for initial control message");
 
+        // The control channel only registers the client_id after the
+        // first inbound message. Send a TerminalResize first to mirror
+        // what the browser does at startup, then the TerminalMetrics.
         let resize_msg = WebClientToWebServerControlMessage {
             web_client_id: web_client_id.clone(),
             payload: WebClientToWebServerControlMessagePayload::TerminalResize(Size {
@@ -581,6 +591,11 @@ mod web_client_tests {
             .await
             .expect("Failed to send TerminalResize");
 
+        // Send the actual TerminalMetrics payload — this is what the
+        // browser-side sendTerminalMetrics() helper writes onto the wire.
+        // Hand-construct the JSON to lock in the exact field names the
+        // browser uses, rather than going through the serde Serialize
+        // impl (which would mask any rename mismatch).
         let metrics_json = serde_json::json!({
             "web_client_id": web_client_id,
             "payload": {
@@ -596,8 +611,11 @@ mod web_client_tests {
             .await
             .expect("Failed to send TerminalMetrics");
 
+        // Give the server a moment to process both messages.
         tokio::time::sleep(Duration::from_millis(500)).await;
 
+        // Inspect the captured ClientToServerMsg traffic on the mock OS
+        // API for this web client.
         let mock_apis = factory_for_verification.mock_apis.lock().unwrap();
         let mut found_pixel_dims: Option<ClientToServerMsg> = None;
         for (_, mock_api) in mock_apis.iter() {

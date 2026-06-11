@@ -74,6 +74,11 @@ use zellij_utils::{
     ipc::{ClientAttributes, ExitReason, ServerToClientMsg},
     shared::{default_palette, web_server_base_url},
 };
+#[cfg(feature = "web_server_capability")]
+use zellij_utils::web_server_commands::{
+    discover_webserver_sockets, query_webserver_with_response,
+    InstructionForWebServer as WebServerInstruction, WebServerResponse,
+};
 
 pub type ClientId = u16;
 
@@ -100,6 +105,7 @@ pub enum ServerInstruction {
         ClientId,
     ),
     AttachWatcherClient(ClientId, Size, bool), // bool -> is_web_client
+    AttachRelayWatcherClient(ClientId, bool),  // bool -> is_web_client
     ConnStatus(ClientId),
     Log(Vec<String>, ClientId, Option<NotificationEnd>),
     LogError(Vec<String>, ClientId, Option<NotificationEnd>),
@@ -129,6 +135,16 @@ pub enum ServerInstruction {
     StartWebServer(ClientId),
     ShareCurrentSession(ClientId),
     StopSharingCurrentSession(ClientId),
+    ShareCurrentSessionToRelay(ClientId),
+    StopSharingCurrentSessionFromRelay(ClientId),
+    /// Phase 6 Session C: persist the relay tunnel auth token for this
+    /// client's runtime config. Empty string clears it. Handled by
+    /// writing into `SessionConfiguration` for the client.
+    SetRelayTunnelAuthToken(ClientId, String),
+    RelayTunnelReady {
+        client_id: ClientId,
+        public_url: Option<String>,
+    },
     SendWebClientsForbidden(ClientId),
     WebServerStarted(String), // String -> base_url
     FailedToStartWebServer(String),
@@ -152,6 +168,7 @@ impl From<&ServerInstruction> for ServerContext {
             ServerInstruction::DetachSession(..) => ServerContext::DetachSession,
             ServerInstruction::AttachClient(..) => ServerContext::AttachClient,
             ServerInstruction::AttachWatcherClient(..) => ServerContext::AttachClient,
+            ServerInstruction::AttachRelayWatcherClient(..) => ServerContext::AttachClient,
             ServerInstruction::ConnStatus(..) => ServerContext::ConnStatus,
             ServerInstruction::Log(..) => ServerContext::Log,
             ServerInstruction::LogError(..) => ServerContext::LogError,
@@ -178,6 +195,16 @@ impl From<&ServerInstruction> for ServerContext {
             ServerInstruction::StopSharingCurrentSession(..) => {
                 ServerContext::StopSharingCurrentSession
             },
+            ServerInstruction::ShareCurrentSessionToRelay(..) => {
+                ServerContext::ShareCurrentSessionToRelay
+            },
+            ServerInstruction::StopSharingCurrentSessionFromRelay(..) => {
+                ServerContext::StopSharingCurrentSessionFromRelay
+            },
+            ServerInstruction::SetRelayTunnelAuthToken(..) => {
+                ServerContext::SetRelayTunnelAuthToken
+            },
+            ServerInstruction::RelayTunnelReady { .. } => ServerContext::RelayTunnelReady,
             ServerInstruction::WebServerStarted(..) => ServerContext::WebServerStarted,
             ServerInstruction::FailedToStartWebServer(..) => ServerContext::FailedToStartWebServer,
             ServerInstruction::ConfigWrittenToDisk(..) => ServerContext::ConfigWrittenToDisk,
@@ -1231,6 +1258,23 @@ pub fn start_server_impl(
                     ))
                     .unwrap();
             },
+            ServerInstruction::AttachRelayWatcherClient(client_id, is_web_client) => {
+                // Virtual watcher for a relay r/o fan-out group. The terminal size
+                // follows the current session viewport; Screen applies that itself.
+                session_state
+                    .write()
+                    .unwrap()
+                    .convert_client_to_watcher(client_id, is_web_client);
+
+                session_data
+                    .write()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .senders
+                    .send_to_screen(ScreenInstruction::AddRelayWatcherClient(client_id))
+                    .unwrap();
+            },
             ServerInstruction::UnblockInputThread => {
                 let client_ids = session_state.read().unwrap().client_ids();
                 for client_id in client_ids {
@@ -1833,6 +1877,258 @@ pub fn start_server_impl(
                     // TODO: test this
                     log::error!("Cannot start web server: this instance of Zellij was compiled without web_server_capability");
                 }
+            },
+            ServerInstruction::ShareCurrentSessionToRelay(client_id) => {
+                #[cfg(feature = "web_server_capability")]
+                {
+                    let is_sharing = session_data
+                        .read()
+                        .ok()
+                        .and_then(|s| s.as_ref().map(|s| s.web_sharing.is_on()))
+                        .unwrap_or(false);
+                    if !is_sharing {
+                        log::error!("Cannot start relay tunnel: web sharing is not enabled");
+                    } else {
+                        let (relay_url, relay_tunnel_auth_token) = session_data
+                            .read()
+                            .ok()
+                            .and_then(|s| {
+                                s.as_ref().map(|s| {
+                                    let opts = &s
+                                        .session_configuration
+                                        .get_client_configuration(&client_id)
+                                        .options;
+                                    (
+                                        opts.relay_server_url.clone(),
+                                        opts.relay_tunnel_auth_token.clone(),
+                                    )
+                                })
+                            })
+                            .unwrap_or((None, None));
+                        match relay_url {
+                            None => {
+                                log::error!(
+                                    "Cannot start relay tunnel: relay_server_url not configured"
+                                );
+                            },
+                            Some(relay_url) => {
+                                let session_name = envs::get_session_name().unwrap_or_default();
+                                let zellij_version = zellij_utils::consts::VERSION.to_string();
+                                let relay_tunnel_auth_token =
+                                    relay_tunnel_auth_token.unwrap_or_default();
+                                let to_server = to_server.clone();
+                                thread::spawn(move || {
+                                    let sockets: Vec<std::path::PathBuf> =
+                                        match discover_webserver_sockets() {
+                                            Ok(s) if !s.is_empty() => s,
+                                            _ => {
+                                                log::error!(
+                                                    "Relay tunnel: no web server socket found"
+                                                );
+                                                let _ = to_server.send(
+                                                    ServerInstruction::RelayTunnelReady {
+                                                        client_id,
+                                                        public_url: None,
+                                                    },
+                                                );
+                                                return;
+                                            },
+                                        };
+                                    let path_str =
+                                        sockets[0].to_str().unwrap_or("").to_string();
+                                    let instruction =
+                                        WebServerInstruction::StartRelayTunnel {
+                                            client_id,
+                                            session_name,
+                                            relay_url,
+                                            zellij_version,
+                                            relay_tunnel_auth_token,
+                                        };
+                                    let result = query_webserver_with_response(
+                                        &path_str,
+                                        instruction,
+                                        10_000,
+                                    );
+                                    // `public_url` carries what the share
+                                    // plugin renders; `established` gates
+                                    // the status poll. On a handshake
+                                    // error there is no tunnel handle on
+                                    // the web-server side, so the error
+                                    // message is surfaced via the same
+                                    // `__RELAY_FAILED__:` sentinel the
+                                    // post-handshake status poll uses,
+                                    // but polling is not started.
+                                    let (public_url, established) = match result {
+                                        Ok(WebServerResponse::RelayTunnelEstablished {
+                                            public_url,
+                                            ..
+                                        }) => (Some(public_url), true),
+                                        Ok(WebServerResponse::RelayTunnelError {
+                                            message,
+                                            ..
+                                        }) => {
+                                            log::error!("Relay tunnel error: {}", message);
+                                            (
+                                                Some(format!(
+                                                    "__RELAY_FAILED__:{}",
+                                                    message
+                                                )),
+                                                false,
+                                            )
+                                        },
+                                        Err(e) => {
+                                            log::error!("Relay tunnel IPC error: {}", e);
+                                            (None, false)
+                                        },
+                                        _ => (None, false),
+                                    };
+                                    let _ = to_server.send(
+                                        ServerInstruction::RelayTunnelReady {
+                                            client_id,
+                                            public_url: public_url.clone(),
+                                        },
+                                    );
+
+                                    // Phase 6 (Session A): if the tunnel
+                                    // came up, poll for status changes so
+                                    // reconnect/failed transitions reach
+                                    // the share plugin via
+                                    // RemoteShareUrlChange. The poll
+                                    // exits when the status reverts to
+                                    // empty string (tunnel stopped) or
+                                    // to a terminal Failed sentinel.
+                                    if established {
+                                        let path_poll = path_str.clone();
+                                        let to_server_poll = to_server.clone();
+                                        thread::spawn(move || {
+                                            let mut last: Option<String> = public_url;
+                                            loop {
+                                                std::thread::sleep(
+                                                    std::time::Duration::from_secs(2),
+                                                );
+                                                let status_result = query_webserver_with_response(
+                                                    &path_poll,
+                                                    WebServerInstruction::GetRelayTunnelStatus {
+                                                        client_id,
+                                                    },
+                                                    5_000,
+                                                );
+                                                let status_url = match status_result {
+                                                    Ok(
+                                                        WebServerResponse::RelayTunnelStatusReport {
+                                                            status_url,
+                                                            ..
+                                                        },
+                                                    ) => status_url,
+                                                    Ok(_) => String::new(),
+                                                    Err(_) => String::new(),
+                                                };
+                                                let next: Option<String> = if status_url.is_empty()
+                                                {
+                                                    None
+                                                } else {
+                                                    Some(status_url)
+                                                };
+                                                if next != last {
+                                                    let _ = to_server_poll.send(
+                                                        ServerInstruction::RelayTunnelReady {
+                                                            client_id,
+                                                            public_url: next.clone(),
+                                                        },
+                                                    );
+                                                    last = next.clone();
+                                                }
+                                                // Exit on tunnel gone or
+                                                // terminal Failed.
+                                                if last.is_none() {
+                                                    break;
+                                                }
+                                                if let Some(v) = &last {
+                                                    if v.starts_with("__RELAY_FAILED__:") {
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        });
+                                    }
+                                });
+                            },
+                        }
+                    }
+                }
+                #[cfg(not(feature = "web_server_capability"))]
+                {
+                    let _ = client_id;
+                    log::error!(
+                        "Cannot start relay tunnel: compiled without web_server_capability"
+                    );
+                }
+            },
+            ServerInstruction::StopSharingCurrentSessionFromRelay(client_id) => {
+                #[cfg(feature = "web_server_capability")]
+                {
+                    let to_server = to_server.clone();
+                    thread::spawn(move || {
+                        let sockets: Vec<std::path::PathBuf> =
+                            match discover_webserver_sockets() {
+                                Ok(s) if !s.is_empty() => s,
+                                _ => {
+                                    log::warn!("StopRelayTunnel: no web server socket found");
+                                    let _ = to_server
+                                        .send(ServerInstruction::RelayTunnelReady {
+                                            client_id,
+                                            public_url: None,
+                                        });
+                                    return;
+                                },
+                            };
+                        let path_str = sockets[0].to_str().unwrap_or("").to_string();
+                        let instruction = WebServerInstruction::StopRelayTunnel { client_id };
+                        let _ = query_webserver_with_response(&path_str, instruction, 5_000);
+                        let _ = to_server.send(ServerInstruction::RelayTunnelReady {
+                            client_id,
+                            public_url: None,
+                        });
+                    });
+                }
+                #[cfg(not(feature = "web_server_capability"))]
+                {
+                    let _ = client_id;
+                    log::error!(
+                        "Cannot stop relay tunnel: compiled without web_server_capability"
+                    );
+                }
+            },
+            ServerInstruction::SetRelayTunnelAuthToken(client_id, token) => {
+                // Persist the token into the client's runtime configuration
+                // so the next `ShareCurrentSessionToRelay` pulls it through
+                // via `get_client_configuration`. Empty string clears the
+                // slot. The value is kept in process memory only — the
+                // saved KDL file on disk is not mutated by this path
+                // (users who want persistence can write it there
+                // themselves, mirroring the existing `--relay-server-url`
+                // pattern).
+                if let Ok(mut guard) = session_data.write() {
+                    if let Some(sd) = guard.as_mut() {
+                        let mut config = sd
+                            .session_configuration
+                            .get_client_configuration(&client_id);
+                        config.options.relay_tunnel_auth_token =
+                            if token.is_empty() { None } else { Some(token) };
+                        sd.session_configuration
+                            .set_client_runtime_configuration(client_id, config);
+                    }
+                }
+            },
+            ServerInstruction::RelayTunnelReady { client_id: _, public_url } => {
+                session_data
+                    .write()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .senders
+                    .send_to_screen(ScreenInstruction::RemoteShareUrlChange(public_url))
+                    .unwrap();
             },
             ServerInstruction::WebServerStarted(base_url) => {
                 session_data

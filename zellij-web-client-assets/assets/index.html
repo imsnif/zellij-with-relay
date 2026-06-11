@@ -3,9 +3,6 @@
     <head>
         <base href="BASE_URL" />
         <link rel="icon" href="assets/favicon.ico" />
-        <link rel="manifest" href="assets/manifest.webmanifest" />
-        <link rel="apple-touch-icon" href="assets/icon-192.png" />
-        <meta name="theme-color" content="#000000" />
         <!-- preload the font to avoid rendering issue on first load
         not 100% perfect but much better than without
         check this for some additional context: https://github.com/xtermjs/xterm.js/issues/5164
@@ -24,21 +21,43 @@
         <title>Zellij Web Client</title>
     </head>
     <body data-authenticated="IS_AUTHENTICATED">
+        <!--
+          Zellij E2E-encryption advertisement. The server substitutes
+          "true" or "false" for EXPECTED_E2E. The viewer JS cross-checks
+          this against the value it receives in the /session auth response;
+          a mismatch blocks the login before any STDIN is transmitted.
+        -->
+        <input type="hidden" id="zellij-expected-e2e" value="EXPECTED_E2E" />
+        <!--
+          First-paint hints for r/o viewers. The server substitutes
+          "true"/"false" for IS_READ_ONLY and numeric strings for
+          SESSION_ROWS/SESSION_COLS. The viewer JS cross-checks these
+          against the /session response (which is authoritative) and
+          lazy-updates via `SessionSizeChanged` control messages.
+        -->
+        <input type="hidden" id="zellij-is-read-only" value="IS_READ_ONLY" />
+        <input type="hidden" id="zellij-session-rows" value="SESSION_ROWS" />
+        <input type="hidden" id="zellij-session-cols" value="SESSION_COLS" />
+        <!--
+          Auth-flow profile, server-asserted. Values:
+            * "relay" — relay-fan-out viewer page; no server-side cookie
+              persistence (the E2E key is derived from the raw token, which
+              only the browser holds).
+            * "local" — standalone web-client page; the server holds a
+              session cookie and issues a persistent variant when
+              `remember_me` is set on /command/login.
+        -->
+        <input type="hidden" id="zellij-auth-mode" value="AUTH_MODE" />
         <div id="terminal" tabindex="0"></div>
         <script src="assets/modals.js"></script>
         <!-- Module files - order matters -->
         <script type="module" src="assets/utils.js"></script>
+        <script type="module" src="assets/crypto.js"></script>
         <script type="module" src="assets/connection.js"></script>
         <script type="module" src="assets/auth.js"></script>
         <script type="module" src="assets/keyboard.js"></script>
         <script type="module" src="assets/links.js"></script>
         <script type="module" src="assets/terminal.js"></script>
-        <script type="module" src="assets/ime-bypass.js"></script>
-        <script type="module" src="assets/soft-keyboard.js"></script>
-        <script type="module" src="assets/key-handler.js"></script>
-        <script type="module" src="assets/mouse.js"></script>
-        <script type="module" src="assets/pinch.js"></script>
-        <script type="module" src="assets/touch.js"></script>
         <script type="module" src="assets/input.js"></script>
         <script type="module" src="assets/websockets.js"></script>
         <script type="module" src="assets/index.js"></script>

@@ -121,7 +121,7 @@ pub use super::generated_api::api::{
         ScrollToBottomInPaneIdPayload, ScrollToTopInPaneIdPayload, ScrollUpInPaneIdPayload,
         SessionListSnapshot as ProtobufSessionListSnapshot, SetFloatingPanePinnedPayload,
         SetPaneBorderlessPayload, SetPaneColorPayload, SetPaneRegexHighlightsPayload,
-        SetSelfMouseSelectionSupportPayload,
+        SetRelayTunnelAuthTokenPayload, SetSelfMouseSelectionSupportPayload,
         SetSoftKeyboardPayload as ProtobufSetSoftKeyboardPayload,
         SetTabFitPayload as ProtobufSetTabFitPayload, SetTimeoutPayload, ShowCursorPayload,
         ShowFloatingPanesPayload as ProtobufShowFloatingPanesPayload,
@@ -2371,6 +2371,26 @@ impl TryFrom<ProtobufPluginCommand> for PluginCommand {
                     Ok(PluginCommand::StopSharingCurrentSession)
                 }
             },
+            Some(CommandName::ShareCurrentSessionToRelay) => {
+                if protobuf_plugin_command.payload.is_some() {
+                    Err("ShareCurrentSessionToRelay should not have a payload")
+                } else {
+                    Ok(PluginCommand::ShareCurrentSessionToRelay)
+                }
+            },
+            Some(CommandName::StopSharingCurrentSessionFromRelay) => {
+                if protobuf_plugin_command.payload.is_some() {
+                    Err("StopSharingCurrentSessionFromRelay should not have a payload")
+                } else {
+                    Ok(PluginCommand::StopSharingCurrentSessionFromRelay)
+                }
+            },
+            Some(CommandName::SetRelayTunnelAuthToken) => match protobuf_plugin_command.payload {
+                Some(Payload::SetRelayTunnelAuthTokenPayload(payload)) => {
+                    Ok(PluginCommand::SetRelayTunnelAuthToken(payload.token))
+                },
+                _ => Err("SetRelayTunnelAuthToken requires a payload"),
+            },
             Some(CommandName::SetSelfMouseSelectionSupport) => {
                 match protobuf_plugin_command.payload {
                     Some(Payload::SetSelfMouseSelectionSupportPayload(
@@ -4142,6 +4162,20 @@ impl TryFrom<PluginCommand> for ProtobufPluginCommand {
                 name: CommandName::StopSharingCurrentSession as i32,
                 payload: None,
             }),
+            PluginCommand::ShareCurrentSessionToRelay => Ok(ProtobufPluginCommand {
+                name: CommandName::ShareCurrentSessionToRelay as i32,
+                payload: None,
+            }),
+            PluginCommand::StopSharingCurrentSessionFromRelay => Ok(ProtobufPluginCommand {
+                name: CommandName::StopSharingCurrentSessionFromRelay as i32,
+                payload: None,
+            }),
+            PluginCommand::SetRelayTunnelAuthToken(token) => Ok(ProtobufPluginCommand {
+                name: CommandName::SetRelayTunnelAuthToken as i32,
+                payload: Some(Payload::SetRelayTunnelAuthTokenPayload(
+                    SetRelayTunnelAuthTokenPayload { token },
+                )),
+            }),
             PluginCommand::SetSelfMouseSelectionSupport(support_mouse_selection) => {
                 Ok(ProtobufPluginCommand {
                     name: CommandName::SetSelfMouseSelectionSupport as i32,
@@ -5253,6 +5287,33 @@ mod tests {
                 assert_eq!(fit, None);
             },
             other => panic!("expected SetTabFit, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn share_current_session_to_relay_roundtrip() {
+        let original = PluginCommand::ShareCurrentSessionToRelay;
+        let proto: ProtobufPluginCommand = original.clone().try_into().unwrap();
+        assert_eq!(proto.name, CommandName::ShareCurrentSessionToRelay as i32);
+        let decoded: PluginCommand = proto.try_into().unwrap();
+        match decoded {
+            PluginCommand::ShareCurrentSessionToRelay => {},
+            other => panic!("expected ShareCurrentSessionToRelay, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn stop_sharing_current_session_from_relay_roundtrip() {
+        let original = PluginCommand::StopSharingCurrentSessionFromRelay;
+        let proto: ProtobufPluginCommand = original.clone().try_into().unwrap();
+        assert_eq!(
+            proto.name,
+            CommandName::StopSharingCurrentSessionFromRelay as i32
+        );
+        let decoded: PluginCommand = proto.try_into().unwrap();
+        match decoded {
+            PluginCommand::StopSharingCurrentSessionFromRelay => {},
+            other => panic!("expected StopSharingCurrentSessionFromRelay, got {:?}", other),
         }
     }
 }

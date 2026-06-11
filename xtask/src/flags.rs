@@ -126,6 +126,10 @@ xflags::xflags! {
             optional --no-plugins
             /// Compile without web support
             optional --no-web
+            /// Build only the zellij-ansi-clip wasm blob (for browser r/o viewers).
+            /// Produces target/wasm32-unknown-unknown/release/zellij_ansi_clip.wasm
+            /// and copies it to zellij-web-client-assets/assets/clip.wasm.
+            optional --wasm-clip
         }
     }
 }
@@ -258,6 +262,7 @@ pub struct Build {
     pub plugins_only: bool,
     pub no_plugins: bool,
     pub no_web: bool,
+    pub wasm_clip: bool,
 }
 
 impl Xtask {

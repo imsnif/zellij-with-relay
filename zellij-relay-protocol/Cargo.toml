@@ -1,0 +1,18 @@
+[package]
+name = "zellij-relay-protocol"
+version.workspace = true
+authors = ["Aram Drevekenin <aram@poor.dev>"]
+edition.workspace = true
+description = "Protocol types shared between Zellij and the zellij-relay tunnel server"
+license.workspace = true
+include = ["src/**/*", "assets/"]
+
+[dependencies]
+anyhow = { workspace = true }
+prost = { workspace = true }
+serde = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+aes-gcm = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
