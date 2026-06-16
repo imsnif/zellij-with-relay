@@ -1,19 +1,13 @@
-/**
- * WebSocket management for terminal and control connections
- */
-
 import { handleReconnection, handleDisconnected, markConnectionEstablished } from "./connection.js";
 import { getBaseUrl, getWebSocketBaseUrl } from "./utils.js";
+import { setSoftKeyboard } from "./input.js";
+import { applyFontSize } from "./terminal.js";
 import { encrypt, decrypt } from "./crypto.js";
 import { createClipper } from "./clip.js";
 
-/**
- * Read cell pixel dimensions from xterm.js. Tries the internal
- * _renderService first (matches what the vendored FitAddon uses) and
- * falls back to a DOM measurement of .xterm-char-measure-element — a
- * hidden helper element xterm.js creates explicitly for character
- * measurement. Returns null if neither path yields usable numbers.
- */
+const NATURAL_MIN_TOTAL_ROWS = 25;
+const MOBILE_LEGIBLE_FLOOR_PX = 16;
+
 function getCellPixelDimensions(term) {
     try {
         const cell =
@@ -36,28 +30,21 @@ function getCellPixelDimensions(term) {
     return null;
 }
 
-/**
- * Send both control messages that describe the client's display state
- * to the Zellij server: TerminalResize (grid rows/cols) and
- * TerminalMetrics (pixel dimensions used to answer host-terminal
- * queries such as CSI 14t / 16t and OSC 11;?).
- *
- * Single chokepoint so the protocol contract lives in one place — any
- * site that updates terminal size or theme must call this helper, and
- * any future field added to the protocol is added here once. The
- * server's TerminalResize handler is idempotent, so calling this even
- * when the grid hasn't changed (e.g. after a theme reload that only
- * shifts font metrics) is safe.
- */
-function sendSizeUpdate(wsControl, ownWebClientId, term, rows, cols) {
+function sendSizeUpdate(wsControl, ownWebClientId, term, rows, cols, cause) {
     if (!wsControl || !ownWebClientId) {
         return;
     }
+    const resizeType =
+        cause === "RenderingPreference"
+            ? "TerminalResizeRendering"
+            : cause === "Settled"
+            ? "TerminalSizeSettled"
+            : "TerminalResize";
     wsControl.send(
         JSON.stringify({
             web_client_id: ownWebClientId,
             payload: {
-                type: "TerminalResize",
+                type: resizeType,
                 rows,
                 cols,
             },
@@ -318,7 +305,6 @@ export function initWebSockets(
         wsTerminal.send(ansiKey);
     };
 
-    // Setup resize handler
     setupResizeHandler(
         term,
         fitAddon,
@@ -382,6 +368,7 @@ function startWsControl(
                 mac_option_is_meta,
                 cursor_style,
                 cursor_inactive_style,
+                font_size,
             } = msg;
             term.options.fontFamily = font;
             term.options.theme = theme;
@@ -399,33 +386,57 @@ function startWsControl(
             if (cursor_inactive_style !== "undefined") {
                 term.options.cursorInactiveStyle = cursor_inactive_style;
             }
+            if (typeof window.__zjSyncInactiveCursorStyle === "function") {
+                window.__zjSyncInactiveCursorStyle();
+            }
+            const isMobileViewport =
+                (window.matchMedia &&
+                    window.matchMedia("(pointer: coarse)").matches &&
+                    window.innerWidth < 600) ||
+                /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
+            const hasExplicitFontSize =
+                typeof font_size === "number" && font_size > 0;
+            const baseFontPx = hasExplicitFontSize
+                ? font_size
+                : isMobileViewport
+                ? 24
+                : 12;
+            applyFontSize(term, fitAddon, baseFontPx);
+            const needsMobileDownscale =
+                !hasExplicitFontSize &&
+                isMobileViewport &&
+                term.rows < NATURAL_MIN_TOTAL_ROWS;
+            if (needsMobileDownscale) {
+                const downscaledPx = Math.max(
+                    Math.floor(
+                        (baseFontPx * term.rows) / NATURAL_MIN_TOTAL_ROWS
+                    ),
+                    MOBILE_LEGIBLE_FLOOR_PX
+                );
+                if (downscaledPx < baseFontPx) {
+                    applyFontSize(term, fitAddon, downscaledPx);
+                }
+            }
             const body = document.querySelector("body");
             body.style.background = theme.background || "black";
 
             const terminal = document.getElementById("terminal");
             terminal.style.background = theme.background;
 
-            const fitDimensions = fitAddon.proposeDimensions();
-            if (fitDimensions === undefined) {
-                console.warn("failed to get new fit dimensions");
-                return;
-            }
-
-            const { rows, cols } = fitDimensions;
-            if (rows !== term.rows || cols !== term.cols) {
-                term.resize(cols, rows);
-            }
-            if (!isReadOnly) {
-                // Always emit a size update on SetConfig: even if the grid
-                // didn't change, font metrics may have shifted and the
-                // pixel-cell measurements in TerminalMetrics need to
-                // refresh so host-terminal queries get accurate values.
-                sendSizeUpdate(wsControl, ownWebClientId, term, rows, cols);
-            } else {
+            if (isReadOnly) {
                 const clipper = getClipper ? getClipper() : null;
                 if (clipper) {
-                    term.write(clipper.emit(rows, cols));
+                    term.write(clipper.emit(term.rows, term.cols));
                 }
+            } else {
+                sendSizeUpdate(
+                    wsControl,
+                    ownWebClientId,
+                    term,
+                    term.rows,
+                    term.cols,
+                    "Settled"
+                );
             }
         } else if (msg.type === "QueryTerminalSize") {
             const fitDimensions = fitAddon.proposeDimensions();
@@ -450,6 +461,9 @@ function startWsControl(
             const { new_session_name } = msg;
             const baseUrl = getBaseUrl();
             window.location.href = `${baseUrl}/${encodeURIComponent(new_session_name)}`;
+        } else if (msg.type === "SetSoftKeyboard") {
+            const { on } = msg;
+            setSoftKeyboard(term, !!on);
         } else if (msg.type === "SessionSizeChanged") {
             // Relay-forwarded sharer-side resize. Update the clipper's
             // session grid and re-emit at the viewer's viewport so the
@@ -471,13 +485,6 @@ function startWsControl(
     };
 }
 
-/**
- * Set up window resize event handler
- * @param {Terminal} term - Terminal instance
- * @param {FitAddon} fitAddon - Terminal fit addon
- * @param {function} getWsControl - Function that returns control WebSocket
- * @param {function} getOwnWebClientId - Function that returns own web client ID
- */
 export function setupResizeHandler(
     term,
     fitAddon,
@@ -487,6 +494,8 @@ export function setupResizeHandler(
     getClipper
 ) {
     let resizeScheduled = false;
+    let pendingViewportSignal = false;
+    let pendingRenderingSignal = false;
 
     const updateViewportVars = () => {
         const root = document.documentElement;
@@ -497,7 +506,7 @@ export function setupResizeHandler(
         root.style.setProperty("--dynamic-vw", `${width}px`);
     };
 
-    const resizeTerminal = () => {
+    const resizeTerminal = (cause) => {
         const ownWebClientId = getOwnWebClientId();
         if (ownWebClientId === "") {
             return;
@@ -514,6 +523,7 @@ export function setupResizeHandler(
             return;
         }
 
+        const wsControl = getWsControl();
         term.resize(cols, rows);
 
         if (isReadOnly) {
@@ -526,29 +536,99 @@ export function setupResizeHandler(
             return;
         }
 
-        const wsControl = getWsControl();
-        sendSizeUpdate(wsControl, ownWebClientId, term, rows, cols);
+        sendSizeUpdate(wsControl, ownWebClientId, term, rows, cols, cause);
     };
 
-    const handleViewportChange = () => {
+    const handleViewportChange = (cause) => {
         updateViewportVars();
-        resizeTerminal();
+        resizeTerminal(cause);
     };
 
-    const scheduleResize = () => {
+    const scheduleResize = (cause) => {
+        if (cause === "RenderingPreference") {
+            pendingRenderingSignal = true;
+        } else {
+            pendingViewportSignal = true;
+        }
         if (resizeScheduled) {
             return;
         }
         resizeScheduled = true;
         requestAnimationFrame(() => {
+            const tickCause =
+                pendingRenderingSignal && !pendingViewportSignal
+                    ? "RenderingPreference"
+                    : "Viewport";
+            pendingViewportSignal = false;
+            pendingRenderingSignal = false;
             resizeScheduled = false;
-            handleViewportChange();
+            handleViewportChange(tickCause);
         });
     };
 
+    const scheduleViewportResize = () => scheduleResize("Viewport");
+    const scheduleRenderingResize = () => scheduleResize("RenderingPreference");
+
     updateViewportVars();
-    addEventListener("resize", scheduleResize);
+    addEventListener("resize", scheduleViewportResize);
     if (window.visualViewport) {
-        window.visualViewport.addEventListener("resize", scheduleResize);
+        window.visualViewport.addEventListener(
+            "resize",
+            scheduleViewportResize
+        );
     }
+    addEventListener("zellij:rendering-resize", scheduleRenderingResize);
+
+    setupSoftKeyboardVisibilityTracker(getWsControl, getOwnWebClientId);
+}
+
+function setupSoftKeyboardVisibilityTracker(getWsControl, getOwnWebClientId) {
+    if (!window.visualViewport) {
+        return;
+    }
+    const VIEWPORT_DELTA_THRESHOLD_PX = 150;
+    let lastViewportHeight = window.visualViewport.height;
+    let kbdVisible = false;
+
+    const onResize = () => {
+        const newHeight = window.visualViewport.height;
+        const delta = newHeight - lastViewportHeight;
+        let newKbdVisible = kbdVisible;
+        if (delta < -VIEWPORT_DELTA_THRESHOLD_PX) {
+            newKbdVisible = true;
+        } else if (delta > VIEWPORT_DELTA_THRESHOLD_PX) {
+            newKbdVisible = false;
+        }
+        lastViewportHeight = newHeight;
+        if (newKbdVisible === kbdVisible) {
+            return;
+        }
+        kbdVisible = newKbdVisible;
+
+        if (!kbdVisible) {
+            const capture =
+                window.__zjSoftKbdCapture &&
+                window.__zjSoftKbdCapture.element;
+            if (capture && window.__zjSoftKbdCapture.isFocused) {
+                capture.blur();
+            }
+        }
+
+        const wsControl = getWsControl();
+        const ownWebClientId = getOwnWebClientId();
+        if (!wsControl || ownWebClientId === "") {
+            return;
+        }
+        wsControl.send(
+            JSON.stringify({
+                web_client_id: ownWebClientId,
+                payload: {
+                    type: "SoftKeyboardVisibilityChanged",
+                    visible: kbdVisible,
+                },
+            })
+        );
+    };
+
+    window.visualViewport.addEventListener("resize", onResize);
 }
