@@ -11,6 +11,13 @@ services:
       RELAY_DATA_DIR: "/var/lib/zellij-relay"
       RUST_LOG: "info"
     restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     expose:
       - "8765"
     volumes:
@@ -30,6 +37,15 @@ services:
     depends_on:
       - relay
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+      - CHOWN
+      - SETUID
+      - SETGID
 
   # Long-running certbot for unattended renewal. The initial cert is obtained
   # by bootstrap-cert.sh before this stack comes up; from then on renew runs

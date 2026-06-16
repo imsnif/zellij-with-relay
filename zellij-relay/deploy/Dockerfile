@@ -20,10 +20,17 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
+RUN groupadd --system --gid 10001 relay \
+ && useradd --system --uid 10001 --gid relay --home-dir /var/lib/zellij-relay --no-create-home relay \
+ && mkdir -p /var/lib/zellij-relay \
+ && chown relay:relay /var/lib/zellij-relay
+
 COPY --from=builder /usr/local/bin/zellij-relay /usr/local/bin/zellij-relay
 
 ENV RELAY_BIND_ADDR=0.0.0.0:8765 \
     RUST_LOG=info
+
+USER relay
 
 EXPOSE 8765
 
