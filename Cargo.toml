@@ -15,8 +15,8 @@ rust-version.workspace = true
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-zellij-client = { path = "zellij-client/", version = "0.44.2" }
-zellij-server = { path = "zellij-server/", version = "0.44.2" }
+zellij-client = { workspace = true }
+zellij-server = { workspace = true }
 zellij-utils = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
@@ -77,7 +77,7 @@ members = [
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/zellij-org/zellij"
-version = "0.44.2"
+version = "0.45.0"
 # NOTE: When updating this, modify `channel` in `rust-toolchain.toml` accordingly
 rust-version = "1.92"
 
@@ -124,10 +124,12 @@ sha2 = { version = "0.10", default-features = false }
 hkdf = { version = "0.12", default-features = false }
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
-zellij-utils = { path = "zellij-utils/", version = "0.44.2" }
-zellij-relay-protocol = { path = "zellij-relay-protocol/", version = "0.44.2" }
-zellij-web-client-assets = { path = "zellij-web-client-assets/", version = "0.44.2" }
-zellij-ansi-clip = { path = "zellij-ansi-clip/", version = "0.44.2", default-features = false }
+zellij-client = { path = "zellij-client/", version = "0.45.0" }
+zellij-server = { path = "zellij-server/", version = "0.45.0" }
+zellij-utils = { path = "zellij-utils/", version = "0.45.0" }
+zellij-relay-protocol = { path = "zellij-relay-protocol/", version = "0.45.0" }
+zellij-web-client-assets = { path = "zellij-web-client-assets/", version = "0.45.0" }
+zellij-ansi-clip = { path = "zellij-ansi-clip/", version = "0.45.0", default-features = false }
 
 [profile.dev-opt]
 inherits = "dev"
