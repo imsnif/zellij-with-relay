@@ -19,25 +19,26 @@
 #     revoke-token   revoke a relay tunnel auth token by label or raw token
 #
 # Flags:
-#     --vps-ip     <ipv4>    public IPv4 of the VPS                       (required for all host-bound commands)
-#     --vps-user   <user>    SSH user on the VPS (e.g. debian)            (required for all host-bound commands)
-#     --le-email   <email>   contact email for LetsEncrypt                (required for deploy)
+#     --vps-ip       <host>  SSH/deploy target of the VPS                 (optional; default zellij.online)
+#     --vps-user     <user>  SSH user on the VPS (e.g. root)              (required for all host-bound commands)
+#     --le-email     <email> contact email for LetsEncrypt                (required for deploy)
+#     --public-host  <fqdn>  public hostname for TLS + URLs               (optional; default zellij.online)
 #     --service    <name>    restrict `logs` to one compose service       (optional)
 #     --label      <name>    label for create-token / revoke-token        (optional for create-token; required for revoke-token unless given positionally)
 #     -h, --help             show this help
 #
 # Example:
-#     ./deploy.sh deploy \
-#         --vps-ip    203.0.113.42 \
-#         --vps-user  debian \
-#         --le-email  you@example.com
+#     ./deploy.sh deploy --vps-user root --le-email you@zellij.online
 #
-#     ./deploy.sh create-token my-laptop --vps-ip 203.0.113.42 --vps-user debian
-#     ./deploy.sh list-tokens             --vps-ip 203.0.113.42 --vps-user debian
-#     ./deploy.sh revoke-token my-laptop  --vps-ip 203.0.113.42 --vps-user debian
+#     ./deploy.sh create-token my-laptop --vps-user root
+#     ./deploy.sh list-tokens             --vps-user root
+#     ./deploy.sh revoke-token my-laptop  --vps-user root
 #
-# The public hostname is derived automatically from --vps-ip via sslip.io:
-#     203.0.113.42 -> 203-0-113-42.sslip.io
+# The SSH target and public hostname both default to zellij.online; its DNS A
+# record must point at the VPS before deploy, or cert issuance fails. To deploy
+# by raw IP (e.g. first bring-up before DNS is pointed) or to a sslip.io
+# testbed, pass --vps-ip and/or --public-host:
+#     --vps-ip 203.0.113.42 --public-host 203-0-113-42.sslip.io
 
 set -euo pipefail
 
@@ -56,6 +57,7 @@ VPS_USER=""
 LE_EMAIL=""
 LOG_SERVICE=""
 TOKEN_LABEL=""
+PUBLIC_HOST_OVERRIDE=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -68,6 +70,8 @@ while [ $# -gt 0 ]; do
         --vps-user=*)   VPS_USER="${1#*=}";   shift ;;
         --le-email)     LE_EMAIL="${2:-}";    shift 2 ;;
         --le-email=*)   LE_EMAIL="${1#*=}";   shift ;;
+        --public-host)   PUBLIC_HOST_OVERRIDE="${2:-}";  shift 2 ;;
+        --public-host=*) PUBLIC_HOST_OVERRIDE="${1#*=}"; shift ;;
         --service)      LOG_SERVICE="${2:-}"; shift 2 ;;
         --service=*)    LOG_SERVICE="${1#*=}"; shift ;;
         --label)        TOKEN_LABEL="${2:-}"; shift 2 ;;
@@ -88,17 +92,18 @@ done
 CMD="${CMD:-deploy}"
 
 need_host_flags() {
-    [ -n "$VPS_IP" ]   || { echo "error: --vps-ip is required for '$CMD'" >&2; exit 2; }
     [ -n "$VPS_USER" ] || { echo "error: --vps-user is required for '$CMD'" >&2; exit 2; }
 }
 
 # ---------- derived settings ----------
 
-if [ -n "$VPS_IP" ]; then
-    PUBLIC_HOST="$(echo "$VPS_IP" | tr . -).sslip.io"
-    export PUBLIC_HOST
-    export DOCKER_HOST="ssh://${VPS_USER}@${VPS_IP}"
-fi
+DEFAULT_PUBLIC_HOST="zellij.online"
+
+VPS_IP="${VPS_IP:-$DEFAULT_PUBLIC_HOST}"
+PUBLIC_HOST="${PUBLIC_HOST_OVERRIDE:-$DEFAULT_PUBLIC_HOST}"
+
+export PUBLIC_HOST
+export DOCKER_HOST="ssh://${VPS_USER}@${VPS_IP}"
 export COMPOSE_PROJECT_NAME="zellij-relay"
 
 # ---------- helpers ----------
@@ -166,7 +171,8 @@ do_deploy() {
 ──────────────────────────────────────────────────────────────────────
   Deploy complete.
 
-  Configure local Zellij:
+  Configure local Zellij (skip on the default host — wss://zellij.online
+  is the built-in default relay):
       cargo x run -- options --relay-server-url wss://${PUBLIC_HOST}
     or add to KDL config:
       options { relay_server_url "wss://${PUBLIC_HOST}"; }

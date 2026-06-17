@@ -328,7 +328,7 @@ pub struct Options {
     /// WebSocket URL of the Zellij relay that "Share to Internet" tunnels to
     /// (e.g. `ws://localhost:8765` for local development, or
     /// `wss://relay.zellij.dev` in production). When `None`, the relay
-    /// tunnel feature is disabled.
+    /// tunnel falls back to the built-in default `wss://zellij.online`.
     #[clap(long, value_parser)]
     #[serde(default)]
     pub relay_server_url: Option<String>,

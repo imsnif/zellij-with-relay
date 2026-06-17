@@ -7,7 +7,7 @@ pub const ENV_BIND_ADDR: &str = "RELAY_BIND_ADDR";
 pub const ENV_PUBLIC_URL_TEMPLATE: &str = "RELAY_PUBLIC_URL_TEMPLATE";
 
 pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8765";
-pub const DEFAULT_PUBLIC_URL_TEMPLATE: &str = "http://localhost:8765/r/{slug}";
+pub const DEFAULT_PUBLIC_URL_TEMPLATE: &str = "https://zellij.online/r/{slug}";
 
 #[derive(Debug, Clone)]
 pub struct RelayConfig {
@@ -47,7 +47,7 @@ mod tests {
         with_env_unset(|| {
             let cfg = RelayConfig::from_env();
             assert_eq!(cfg.bind_addr, "127.0.0.1:8765");
-            assert_eq!(cfg.public_url_template, "http://localhost:8765/r/{slug}");
+            assert_eq!(cfg.public_url_template, "https://zellij.online/r/{slug}");
         });
     }
 

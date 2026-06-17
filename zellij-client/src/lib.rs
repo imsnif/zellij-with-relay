@@ -858,7 +858,7 @@ pub async fn run_remote_client_terminal_loop(
 ///
 /// `extra_relay_urls` should carry the local `relay_server_url` config
 /// (if any) plus any other trusted relay URLs. Hosts extracted from
-/// these are appended to the hard-coded `zellij.dev` known-relay list
+/// these are appended to the hard-coded `zellij.online` known-relay list
 /// so self-hosted setups get the same downgrade-refusal treatment.
 #[cfg(feature = "web_server_capability")]
 pub fn start_remote_client(

@@ -29,7 +29,7 @@ One manual step, done once:
 2. When the instance email arrives, record the public IPv4.
 3. Confirm you can reach it:
    ```
-   ssh debian@<ip> true
+   ssh root@<ip> true
    ```
 
 The deploy script installs Docker on first run; nothing else is needed
@@ -43,13 +43,33 @@ on the VPS.
 cd zellij-relay/deploy
 
 ./deploy.sh deploy \
-    --vps-ip    203.0.113.42 \
-    --vps-user  debian \
-    --le-email  you@example.com
+    --vps-user  root \
+    --le-email  you@zellij.online
 ```
 
-`deploy` is the default command, so `./deploy.sh --vps-ip … --vps-user … --le-email …`
+`deploy` is the default command, so `./deploy.sh --vps-user … --le-email …`
 works too.
+
+Both the SSH/deploy target (`--vps-ip`) and the public hostname
+(`--public-host`) default to `zellij.online` — the same host clients use by
+default (see below), so a relay deployed there needs no client
+`relay_server_url` configuration at all. Point a DNS `A` record for
+`zellij.online` at the VPS **before** deploy, or both the SSH connection and
+Let's Encrypt issuance fail.
+
+### Different host or testbed
+
+To deploy by raw IP (e.g. first bring-up before DNS is pointed at the box) or
+to serve from a zero-DNS `sslip.io` testbed, pass `--vps-ip` and/or
+`--public-host`:
+
+```sh
+./deploy.sh deploy \
+    --vps-ip       203.0.113.42 \
+    --vps-user     root \
+    --le-email     you@example.com \
+    --public-host  203-0-113-42.sslip.io
+```
 
 First run takes a few minutes (Docker install + relay build + cert
 issuance). Re-runs are seconds for a no-op, a minute or two when
@@ -58,16 +78,17 @@ relay code changes.
 The script prints the local Zellij command at the end:
 
 ```
-zellij options --relay-server-url wss://<ip-dashes>.sslip.io
+zellij options --relay-server-url wss://zellij.online
 ```
 
 or the equivalent `options { relay_server_url "wss://..."; }` line for
-your KDL config.
+your KDL config. Since `wss://zellij.online` is the built-in default, this
+step can be skipped entirely when deploying to the default host.
 
 ### Tip: shell alias for repeated runs
 
 ```sh
-alias zr='./deploy.sh --vps-ip 203.0.113.42 --vps-user debian'
+alias zr='./deploy.sh --vps-user root'
 zr logs
 zr ps
 zr deploy --le-email you@example.com
@@ -80,7 +101,7 @@ In a Zellij session on your laptop:
 1. Open the share plugin (`Ctrl-o` → share).
 2. `t` → `n` to generate a read/write token. Record it.
 3. Press `i` — within ~1 s the plugin shows
-   `Public URL: https://<ip-dashes>.sslip.io/r/<slug>`.
+   `Public URL: https://zellij.online/r/<slug>`.
 4. Open that URL in any browser. Paste the token. Live session.
 5. Press `I` in the plugin to tear the tunnel down.
 
@@ -104,9 +125,9 @@ relay binary inside the running container via the same SSH docker
 context as the rest of the script:
 
 ```sh
-./deploy.sh create-token my-laptop --vps-ip 203.0.113.42 --vps-user debian
-./deploy.sh list-tokens             --vps-ip 203.0.113.42 --vps-user debian
-./deploy.sh revoke-token my-laptop  --vps-ip 203.0.113.42 --vps-user debian
+./deploy.sh create-token my-laptop --vps-user root
+./deploy.sh list-tokens             --vps-user root
+./deploy.sh revoke-token my-laptop  --vps-user root
 ```
 
 The label is also accepted via `--label <name>` if a positional value
@@ -116,6 +137,9 @@ is awkward in your shell.
 the SHA-256 hash is written to disk.
 
 ### Configure Zellij to use the token
+
+`relay_server_url` defaults to `wss://zellij.online`, so it only needs to be
+set when targeting a different relay (e.g. a `sslip.io` testbed or local dev).
 
 Either persist in KDL:
 
@@ -150,15 +174,16 @@ the same (now-revoked) raw token fails at the auth step.
 
 ## Operate
 
-All operational commands need `--vps-ip` and `--vps-user` (they drive the
-SSH docker context):
+All operational commands need `--vps-user` (and `--vps-ip` only when the
+target is not the default `zellij.online`); together they drive the SSH
+docker context:
 
 ```sh
-./deploy.sh logs    --vps-ip 203.0.113.42 --vps-user debian
-./deploy.sh logs    --vps-ip 203.0.113.42 --vps-user debian --service relay
-./deploy.sh ps      --vps-ip 203.0.113.42 --vps-user debian
-./deploy.sh restart --vps-ip 203.0.113.42 --vps-user debian
-./deploy.sh destroy --vps-ip 203.0.113.42 --vps-user debian   # prompts
+./deploy.sh logs    --vps-user root
+./deploy.sh logs    --vps-user root --service relay
+./deploy.sh ps      --vps-user root
+./deploy.sh restart --vps-user root
+./deploy.sh destroy --vps-user root   # prompts
 ```
 
 Under the hood every command runs via `DOCKER_HOST=ssh://…` — no shell
@@ -167,7 +192,7 @@ sessions on the VPS. The compose project name is fixed at `zellij-relay`.
 ## Redeploying after code changes
 
 ```sh
-./deploy.sh --vps-ip 203.0.113.42 --vps-user debian --le-email you@example.com
+./deploy.sh --vps-user root --le-email you@zellij.online
 ```
 
 (Rebuilds images, rolls containers. Cert bootstrap is a no-op when the
@@ -175,19 +200,20 @@ cert already exists.)
 
 ## Hostname / IP changes
 
-If the VPS IP changes, update `VPS_IP` in `.env` and rerun. The nginx
-image bakes the hostname in at build time (because Let's Encrypt cert
-paths must be literal), so `deploy.sh` rebuilds nginx and
-`bootstrap-cert.sh` issues a fresh cert for the new hostname.
+When the public host stays `zellij.online`, moving to a new box only requires
+re-pointing the DNS `A` record, then rerunning `deploy.sh` (the default SSH
+target follows DNS automatically). The nginx image bakes the hostname in
+at build time (because Let's Encrypt cert paths must be literal), so a change
+to `--public-host` triggers an nginx rebuild and a fresh cert via
+`bootstrap-cert.sh`.
 
-## Why sslip.io?
+## Without a domain (sslip.io)
 
-The plan avoids registering a domain. `sslip.io` resolves any hostname
-of the form `<ip-with-dashes>.sslip.io` to the embedded IP. It is a
-real DNS name from Let's Encrypt's perspective, so you get a valid
-CA-signed cert without owning a domain. If the shared rate limit on
-`sslip.io` bites, `nip.io` and `traefik.me` are drop-in alternatives —
-edit the `PUBLIC_HOST` derivation in `deploy.sh`.
+To test without owning a domain, pass `--public-host <ip-with-dashes>.sslip.io`.
+`sslip.io` resolves any hostname of that form to the embedded IP and is a real
+DNS name from Let's Encrypt's perspective, so a valid CA-signed cert issues
+without a registration. If the shared rate limit on `sslip.io` bites, `nip.io`
+and `traefik.me` are drop-in alternatives.
 
 ## Files
 

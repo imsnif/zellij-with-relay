@@ -95,7 +95,7 @@ const MAX_AUTH_ATTEMPTS: u32 = 3;
 /// `extra_relay_urls` carries additional relay URLs (typically the
 /// local `relay_server_url` config) whose hosts should be treated as
 /// known relays for the downgrade-refusal check. Added on top of the
-/// hard-coded `zellij.dev` entry. Invalid URLs are logged and ignored.
+/// hard-coded `zellij.online` entry. Invalid URLs are logged and ignored.
 pub fn attach_to_remote_session(
     runtime: Handle,
     _os_input: Box<dyn ClientOsApi>,
@@ -246,7 +246,7 @@ fn authenticate_with_retry(
     // the relay's `serve_html` always returns `EXPECTED_E2E=true`, the
     // local web server reflects the `encrypt_web_sharing` option.
     //
-    // Known-relay URLs (`zellij.dev` + subdomains, plus any host taken
+    // Known-relay URLs (`zellij.online` + subdomains, plus any host taken
     // from `extra_known_hosts`) force the locked state regardless of
     // what the challenge page claims.
     let expected_e2e = runtime.block_on(async {
@@ -357,7 +357,7 @@ fn authenticate_with_retry(
 /// Known-relay hostname list, mirroring `KNOWN_RELAY_HOSTS` in the
 /// browser auth.js. Forces `expected_e2e = true` regardless of what the
 /// challenge page claims.
-const KNOWN_RELAY_HOSTS: &[&str] = &["zellij.dev"];
+const KNOWN_RELAY_HOSTS: &[&str] = &["zellij.online"];
 
 fn host_is_known_relay(host: &str, extra_known_hosts: &[String]) -> bool {
     let host = host.to_lowercase();
@@ -379,7 +379,7 @@ async fn probe_expected_e2e(
     extra_known_hosts: &[String],
 ) -> bool {
     // Known-relay short-circuit: do not trust the challenge page to
-    // advertise encryption on `zellij.dev` or any host from the local
+    // advertise encryption on `zellij.online` or any host from the local
     // config's `relay_server_url` — always require it.
     if let Ok(parsed) = url::Url::parse(remote_session_url) {
         if let Some(host) = parsed.host_str() {

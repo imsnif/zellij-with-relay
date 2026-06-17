@@ -7,7 +7,7 @@ services:
       dockerfile: zellij-relay/deploy/Dockerfile
     environment:
       RELAY_BIND_ADDR: "0.0.0.0:8765"
-      RELAY_PUBLIC_URL_TEMPLATE: "https://${PUBLIC_HOST:?set PUBLIC_HOST}/r/{slug}"
+      RELAY_PUBLIC_URL_TEMPLATE: "https://${PUBLIC_HOST:-zellij.online}/r/{slug}"
       RELAY_DATA_DIR: "/var/lib/zellij-relay"
       RUST_LOG: "info"
     restart: unless-stopped
@@ -27,7 +27,7 @@ services:
     build:
       context: ./nginx
       args:
-        PUBLIC_HOST: "${PUBLIC_HOST:?set PUBLIC_HOST}"
+        PUBLIC_HOST: "${PUBLIC_HOST:-zellij.online}"
     ports:
       - "80:80"
       - "443:443"

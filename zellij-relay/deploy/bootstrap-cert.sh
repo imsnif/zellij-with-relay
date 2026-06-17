@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-: "${PUBLIC_HOST:?PUBLIC_HOST must be set}"
+: "${PUBLIC_HOST:=zellij.online}"
 : "${LE_EMAIL:?LE_EMAIL must be set}"
 
 PROJECT_NAME="${COMPOSE_PROJECT_NAME:-zellij-relay}"

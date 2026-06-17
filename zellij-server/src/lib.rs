@@ -1905,155 +1905,149 @@ pub fn start_server_impl(
                                 })
                             })
                             .unwrap_or((None, None));
-                        match relay_url {
-                            None => {
-                                log::error!(
-                                    "Cannot start relay tunnel: relay_server_url not configured"
-                                );
-                            },
-                            Some(relay_url) => {
-                                let session_name = envs::get_session_name().unwrap_or_default();
-                                let zellij_version = zellij_utils::consts::VERSION.to_string();
-                                let relay_tunnel_auth_token =
-                                    relay_tunnel_auth_token.unwrap_or_default();
-                                let to_server = to_server.clone();
-                                thread::spawn(move || {
-                                    let sockets: Vec<std::path::PathBuf> =
-                                        match discover_webserver_sockets() {
-                                            Ok(s) if !s.is_empty() => s,
-                                            _ => {
-                                                log::error!(
-                                                    "Relay tunnel: no web server socket found"
-                                                );
-                                                let _ = to_server.send(
-                                                    ServerInstruction::RelayTunnelReady {
-                                                        client_id,
-                                                        public_url: None,
-                                                    },
-                                                );
-                                                return;
+                        let relay_url = relay_url.unwrap_or_else(|| {
+                            zellij_utils::consts::DEFAULT_RELAY_SERVER_URL.to_string()
+                        });
+                        let session_name = envs::get_session_name().unwrap_or_default();
+                        let zellij_version = zellij_utils::consts::VERSION.to_string();
+                        let relay_tunnel_auth_token =
+                            relay_tunnel_auth_token.unwrap_or_default();
+                        let to_server = to_server.clone();
+                        thread::spawn(move || {
+                            let sockets: Vec<std::path::PathBuf> =
+                                match discover_webserver_sockets() {
+                                    Ok(s) if !s.is_empty() => s,
+                                    _ => {
+                                        log::error!(
+                                            "Relay tunnel: no web server socket found"
+                                        );
+                                        let _ = to_server.send(
+                                            ServerInstruction::RelayTunnelReady {
+                                                client_id,
+                                                public_url: None,
                                             },
-                                        };
-                                    let path_str =
-                                        sockets[0].to_str().unwrap_or("").to_string();
-                                    let instruction =
-                                        WebServerInstruction::StartRelayTunnel {
-                                            client_id,
-                                            session_name,
-                                            relay_url,
-                                            zellij_version,
-                                            relay_tunnel_auth_token,
-                                        };
-                                    let result = query_webserver_with_response(
-                                        &path_str,
-                                        instruction,
-                                        10_000,
-                                    );
-                                    // `public_url` carries what the share
-                                    // plugin renders; `established` gates
-                                    // the status poll. On a handshake
-                                    // error there is no tunnel handle on
-                                    // the web-server side, so the error
-                                    // message is surfaced via the same
-                                    // `__RELAY_FAILED__:` sentinel the
-                                    // post-handshake status poll uses,
-                                    // but polling is not started.
-                                    let (public_url, established) = match result {
-                                        Ok(WebServerResponse::RelayTunnelEstablished {
-                                            public_url,
-                                            ..
-                                        }) => (Some(public_url), true),
-                                        Ok(WebServerResponse::RelayTunnelError {
-                                            message,
-                                            ..
-                                        }) => {
-                                            log::error!("Relay tunnel error: {}", message);
-                                            (
-                                                Some(format!(
-                                                    "__RELAY_FAILED__:{}",
-                                                    message
-                                                )),
-                                                false,
-                                            )
-                                        },
-                                        Err(e) => {
-                                            log::error!("Relay tunnel IPC error: {}", e);
-                                            (None, false)
-                                        },
-                                        _ => (None, false),
-                                    };
-                                    let _ = to_server.send(
-                                        ServerInstruction::RelayTunnelReady {
-                                            client_id,
-                                            public_url: public_url.clone(),
-                                        },
-                                    );
+                                        );
+                                        return;
+                                    },
+                                };
+                            let path_str =
+                                sockets[0].to_str().unwrap_or("").to_string();
+                            let instruction =
+                                WebServerInstruction::StartRelayTunnel {
+                                    client_id,
+                                    session_name,
+                                    relay_url,
+                                    zellij_version,
+                                    relay_tunnel_auth_token,
+                                };
+                            let result = query_webserver_with_response(
+                                &path_str,
+                                instruction,
+                                10_000,
+                            );
+                            // `public_url` carries what the share
+                            // plugin renders; `established` gates
+                            // the status poll. On a handshake
+                            // error there is no tunnel handle on
+                            // the web-server side, so the error
+                            // message is surfaced via the same
+                            // `__RELAY_FAILED__:` sentinel the
+                            // post-handshake status poll uses,
+                            // but polling is not started.
+                            let (public_url, established) = match result {
+                                Ok(WebServerResponse::RelayTunnelEstablished {
+                                    public_url,
+                                    ..
+                                }) => (Some(public_url), true),
+                                Ok(WebServerResponse::RelayTunnelError {
+                                    message,
+                                    ..
+                                }) => {
+                                    log::error!("Relay tunnel error: {}", message);
+                                    (
+                                        Some(format!(
+                                            "__RELAY_FAILED__:{}",
+                                            message
+                                        )),
+                                        false,
+                                    )
+                                },
+                                Err(e) => {
+                                    log::error!("Relay tunnel IPC error: {}", e);
+                                    (None, false)
+                                },
+                                _ => (None, false),
+                            };
+                            let _ = to_server.send(
+                                ServerInstruction::RelayTunnelReady {
+                                    client_id,
+                                    public_url: public_url.clone(),
+                                },
+                            );
 
-                                    // Phase 6 (Session A): if the tunnel
-                                    // came up, poll for status changes so
-                                    // reconnect/failed transitions reach
-                                    // the share plugin via
-                                    // RemoteShareUrlChange. The poll
-                                    // exits when the status reverts to
-                                    // empty string (tunnel stopped) or
-                                    // to a terminal Failed sentinel.
-                                    if established {
-                                        let path_poll = path_str.clone();
-                                        let to_server_poll = to_server.clone();
-                                        thread::spawn(move || {
-                                            let mut last: Option<String> = public_url;
-                                            loop {
-                                                std::thread::sleep(
-                                                    std::time::Duration::from_secs(2),
-                                                );
-                                                let status_result = query_webserver_with_response(
-                                                    &path_poll,
-                                                    WebServerInstruction::GetRelayTunnelStatus {
-                                                        client_id,
-                                                    },
-                                                    5_000,
-                                                );
-                                                let status_url = match status_result {
-                                                    Ok(
-                                                        WebServerResponse::RelayTunnelStatusReport {
-                                                            status_url,
-                                                            ..
-                                                        },
-                                                    ) => status_url,
-                                                    Ok(_) => String::new(),
-                                                    Err(_) => String::new(),
-                                                };
-                                                let next: Option<String> = if status_url.is_empty()
-                                                {
-                                                    None
-                                                } else {
-                                                    Some(status_url)
-                                                };
-                                                if next != last {
-                                                    let _ = to_server_poll.send(
-                                                        ServerInstruction::RelayTunnelReady {
-                                                            client_id,
-                                                            public_url: next.clone(),
-                                                        },
-                                                    );
-                                                    last = next.clone();
-                                                }
-                                                // Exit on tunnel gone or
-                                                // terminal Failed.
-                                                if last.is_none() {
-                                                    break;
-                                                }
-                                                if let Some(v) = &last {
-                                                    if v.starts_with("__RELAY_FAILED__:") {
-                                                        break;
-                                                    }
-                                                }
+                            // Phase 6 (Session A): if the tunnel
+                            // came up, poll for status changes so
+                            // reconnect/failed transitions reach
+                            // the share plugin via
+                            // RemoteShareUrlChange. The poll
+                            // exits when the status reverts to
+                            // empty string (tunnel stopped) or
+                            // to a terminal Failed sentinel.
+                            if established {
+                                let path_poll = path_str.clone();
+                                let to_server_poll = to_server.clone();
+                                thread::spawn(move || {
+                                    let mut last: Option<String> = public_url;
+                                    loop {
+                                        std::thread::sleep(
+                                            std::time::Duration::from_secs(2),
+                                        );
+                                        let status_result = query_webserver_with_response(
+                                            &path_poll,
+                                            WebServerInstruction::GetRelayTunnelStatus {
+                                                client_id,
+                                            },
+                                            5_000,
+                                        );
+                                        let status_url = match status_result {
+                                            Ok(
+                                                WebServerResponse::RelayTunnelStatusReport {
+                                                    status_url,
+                                                    ..
+                                                },
+                                            ) => status_url,
+                                            Ok(_) => String::new(),
+                                            Err(_) => String::new(),
+                                        };
+                                        let next: Option<String> = if status_url.is_empty()
+                                        {
+                                            None
+                                        } else {
+                                            Some(status_url)
+                                        };
+                                        if next != last {
+                                            let _ = to_server_poll.send(
+                                                ServerInstruction::RelayTunnelReady {
+                                                    client_id,
+                                                    public_url: next.clone(),
+                                                },
+                                            );
+                                            last = next.clone();
+                                        }
+                                        // Exit on tunnel gone or
+                                        // terminal Failed.
+                                        if last.is_none() {
+                                            break;
+                                        }
+                                        if let Some(v) = &last {
+                                            if v.starts_with("__RELAY_FAILED__:") {
+                                                break;
                                             }
-                                        });
+                                        }
                                     }
                                 });
-                            },
-                        }
+                            }
+                        });
                     }
                 }
                 #[cfg(not(feature = "web_server_capability"))]

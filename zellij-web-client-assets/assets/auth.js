@@ -12,12 +12,12 @@ import { sha256Hex, deriveKey } from "./crypto.js";
  * field on the challenge page. A compromised relay serving
  * `EXPECTED_E2E=false` is therefore caught before any STDIN is sent.
  */
-const KNOWN_RELAY_HOSTS = ["zellij.dev"];
+const KNOWN_RELAY_HOSTS = ["zellij.online"];
 
 /**
  * Returns true if the current page's URL is a known-relay URL. Exact
- * match or `.<host>` suffix so `relay.zellij.dev` and `my.zellij.dev`
- * are recognised but an unrelated `zellij.dev.evil.com` is not.
+ * match or `.<host>` suffix so `relay.zellij.online` and `my.zellij.online`
+ * are recognised but an unrelated `zellij.online.evil.com` is not.
  */
 function pageIsOnKnownRelay() {
     const host = location.hostname.toLowerCase();

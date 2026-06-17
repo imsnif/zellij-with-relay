@@ -5,8 +5,7 @@
 
 FROM nginx:1.27-alpine
 
-ARG PUBLIC_HOST
-RUN test -n "${PUBLIC_HOST}" || (echo "PUBLIC_HOST build arg is required" && exit 1)
+ARG PUBLIC_HOST=zellij.online
 
 RUN apk add --no-cache gettext
 

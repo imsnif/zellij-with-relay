@@ -401,7 +401,7 @@ function getSecurityToken() {
     // KNOWN_RELAY_HOSTS list in auth.js.
     const isKnownRelay = (() => {
       const host = location.hostname.toLowerCase();
-      const list = ['zellij.dev'];
+      const list = ['zellij.online'];
       for (const r of list) {
         if (host === r || host.endsWith('.' + r)) return true;
       }
