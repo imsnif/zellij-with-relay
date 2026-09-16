@@ -146,6 +146,12 @@ xflags::xflags! {
             optional --https-port port: u16
             optional --host host: String
         }
+
+        cmd relay-sharer-dev {
+            optional --https-port port: u16
+            optional --host host: String
+            repeated args: OsString
+        }
     }
 }
 // generated start
@@ -171,6 +177,7 @@ pub enum XtaskCmd {
     IntegrationTest(IntegrationTest),
     Build(Build),
     RelayDev(RelayDev),
+    RelaySharerDev(RelaySharerDev),
 }
 
 #[derive(Debug)]
@@ -286,6 +293,14 @@ pub struct Build {
 
 #[derive(Debug)]
 pub struct RelayDev {
+    pub https_port: Option<u16>,
+    pub host: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct RelaySharerDev {
+    pub args: Vec<OsString>,
+
     pub https_port: Option<u16>,
     pub host: Option<String>,
 }

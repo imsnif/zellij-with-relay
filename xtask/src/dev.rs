@@ -1,14 +1,31 @@
-use std::path::Path;
-use std::process::{Command, Stdio};
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
 use xshell::Shell;
 
 const RELAY_BIND: &str = "127.0.0.1:8765";
+const SHARER_PROFILE: &str = "dev-opt";
 
-pub fn relay_dev(sh: &Shell, flags: crate::flags::RelayDev) -> anyhow::Result<()> {
-    let https_port = flags.https_port.unwrap_or(8443);
-    let host = flags.host.clone().unwrap_or_else(|| "localhost".to_string());
+struct RelayDevEnv {
+    https_port: u16,
+    lan_mode: bool,
+    relay_authority: String,
+    same_origin_relay: bool,
+    app_origin: String,
+    public_url_template: String,
+    dev_dir: PathBuf,
+    data_dir: PathBuf,
+    caddyfile: PathBuf,
+    ca_cert_path: PathBuf,
+    token: String,
+}
+
+fn prepare(sh: &Shell, https_port: Option<u16>, host: Option<String>) -> anyhow::Result<RelayDevEnv> {
+    let https_port = https_port.unwrap_or(8443);
+    let host = host.unwrap_or_else(|| "localhost".to_string());
     if host.contains('/') || host.contains(':') {
         bail!(
             "--host expects a bare hostname or IPv4 address (no scheme, no port); \
@@ -55,44 +72,214 @@ pub fn relay_dev(sh: &Shell, flags: crate::flags::RelayDev) -> anyhow::Result<()
 
     clear_stale_leaf_certs(&host, &relay_authority);
 
-    let mut caddy = Command::new("caddy")
-        .arg("run")
+    Ok(RelayDevEnv {
+        https_port,
+        lan_mode,
+        relay_authority,
+        same_origin_relay,
+        app_origin,
+        public_url_template,
+        dev_dir,
+        data_dir,
+        caddyfile,
+        ca_cert_path,
+        token,
+    })
+}
+
+fn spawn_caddy(env: &RelayDevEnv, log: Option<&Path>) -> anyhow::Result<Child> {
+    let mut cmd = Command::new("caddy");
+    cmd.arg("run")
         .arg("--adapter")
         .arg("caddyfile")
         .arg("--config")
-        .arg(&caddyfile)
-        .spawn()
-        .context("failed to start caddy")?;
-
-    std::thread::sleep(std::time::Duration::from_millis(1500));
+        .arg(&env.caddyfile);
+    if let Some(log) = log {
+        let (out, err) = open_log(log)?;
+        cmd.stdout(out).stderr(err);
+    }
+    let mut caddy = cmd.spawn().context("failed to start caddy")?;
+    std::thread::sleep(Duration::from_millis(1500));
     if let Ok(Some(status)) = caddy.try_wait() {
-        bail!(caddy_died_message(status, https_port));
+        bail!(caddy_died_message(status, env.https_port));
+    }
+    Ok(caddy)
+}
+
+fn relay_command(env: &RelayDevEnv) -> anyhow::Result<Command> {
+    let mut cmd = Command::new(crate::cargo()?);
+    cmd.args(["run", "-q", "-p", "zellij-relay-server"])
+        .env("RELAY_BIND_ADDR", RELAY_BIND)
+        .env("RELAY_ALLOWED_ORIGINS", &env.app_origin)
+        .env("RELAY_PUBLIC_URL_TEMPLATE", &env.public_url_template)
+        .env("RELAY_DATA_DIR", &env.data_dir)
+        .current_dir(crate::project_root());
+    Ok(cmd)
+}
+
+fn open_log(path: &Path) -> anyhow::Result<(std::fs::File, std::fs::File)> {
+    let out = std::fs::File::create(path)
+        .with_context(|| format!("failed to create log file {}", path.display()))?;
+    let err = out.try_clone()?;
+    Ok((out, err))
+}
+
+fn stop(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+pub fn relay_dev(sh: &Shell, flags: crate::flags::RelayDev) -> anyhow::Result<()> {
+    let env = prepare(sh, flags.https_port, flags.host)?;
+    let mut caddy = spawn_caddy(&env, None)?;
+
+    ensure_ca_trusted(&env.ca_cert_path, &env.dev_dir);
+    print_instructions(&env, None);
+
+    let relay_status = relay_command(&env)?.status();
+
+    stop(&mut caddy);
+    relay_status.context("relay process failed to run")?;
+    Ok(())
+}
+
+pub fn relay_sharer_dev(sh: &Shell, flags: crate::flags::RelaySharerDev) -> anyhow::Result<()> {
+    let env = prepare(sh, flags.https_port, flags.host)?;
+    let root = crate::project_root();
+
+    crate::build::build(
+        sh,
+        crate::flags::Build {
+            release: false,
+            no_plugins: false,
+            plugins_only: true,
+            no_web: false,
+            args: vec![],
+            wasm_clip: false,
+            app_origin: None,
+            app_host: None,
+        },
+    )
+    .context("failed to build the plugins for the sharer")?;
+    let status = Command::new(crate::cargo()?)
+        .args(["build", "-q", "--profile", SHARER_PROFILE, "-p", "zellij"])
+        .current_dir(&root)
+        .status()
+        .context("failed to run cargo build for the sharer")?;
+    if !status.success() {
+        bail!("cargo build for the sharer exited with {}", status);
     }
 
-    ensure_ca_trusted(&ca_cert_path, &dev_dir);
+    let token_file = env.dev_dir.join("token");
+    write_token_file(&token_file, &env.token)?;
 
-    print_instructions(
-        &app_origin,
-        &relay_authority,
-        https_port,
-        &token,
-        lan_mode,
-        same_origin_relay,
-        &ca_cert_path,
-    );
+    let caddy_log = env.dev_dir.join("caddy.log");
+    let relay_log = env.dev_dir.join("relay.log");
+    let mut caddy = spawn_caddy(&env, Some(&caddy_log))?;
 
-    let relay_status = Command::new(crate::cargo()?)
-        .args(["run", "-q", "-p", "zellij-relay-server"])
-        .env("RELAY_BIND_ADDR", RELAY_BIND)
-        .env("RELAY_ALLOWED_ORIGINS", &app_origin)
-        .env("RELAY_PUBLIC_URL_TEMPLATE", &public_url_template)
-        .env("RELAY_DATA_DIR", &data_dir)
+    let (out, err) = open_log(&relay_log)?;
+    let mut relay = match relay_command(&env)?.stdout(out).stderr(err).spawn() {
+        Ok(relay) => relay,
+        Err(e) => {
+            stop(&mut caddy);
+            return Err(e).context("failed to start the relay");
+        },
+    };
+
+    if let Err(e) = wait_for_relay(&mut relay, &mut caddy, &relay_log, &caddy_log) {
+        stop(&mut relay);
+        stop(&mut caddy);
+        return Err(e);
+    }
+
+    ensure_ca_trusted(&env.ca_cert_path, &env.dev_dir);
+    print_instructions(&env, Some(&token_file));
+
+    let sharer_args = sharer_cargo_args(flags.args);
+    let zellij_status = Command::new(crate::cargo()?)
+        .args(&sharer_args)
+        .env("ZELLIJ_RELAY_TUNNEL_AUTH_TOKEN", &env.token)
         .current_dir(&root)
         .status();
 
-    let _ = caddy.kill();
-    let _ = caddy.wait();
-    relay_status.context("relay process failed to run")?;
+    stop(&mut relay);
+    stop(&mut caddy);
+
+    let zellij_status = zellij_status.context("failed to run the sharer zellij")?;
+    if !zellij_status.success() {
+        bail!("zellij exited with {}", zellij_status);
+    }
+    Ok(())
+}
+
+fn sharer_cargo_args(user_args: Vec<OsString>) -> Vec<OsString> {
+    let (top_level, option_args) = match user_args.iter().position(|a| a == "options") {
+        Some(i) => (user_args[..i].to_vec(), user_args[i + 1..].to_vec()),
+        None => (user_args, Vec::new()),
+    };
+    let mut args: Vec<OsString> = vec![
+        "run".into(),
+        "-q".into(),
+        "--profile".into(),
+        SHARER_PROFILE.into(),
+        "-p".into(),
+        "zellij".into(),
+        "--".into(),
+    ];
+    args.extend(top_level);
+    args.push("options".into());
+    args.push("--relay-server-url".into());
+    args.push(format!("ws://{}", RELAY_BIND).into());
+    args.extend(option_args);
+    args
+}
+
+fn wait_for_relay(
+    relay: &mut Child,
+    caddy: &mut Child,
+    relay_log: &Path,
+    caddy_log: &Path,
+) -> anyhow::Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Ok(Some(status)) = relay.try_wait() {
+            bail!(
+                "relay exited before becoming ready ({status}); see {}",
+                relay_log.display()
+            );
+        }
+        if let Ok(Some(status)) = caddy.try_wait() {
+            bail!(
+                "caddy exited before the relay became ready ({status}); see {}",
+                caddy_log.display()
+            );
+        }
+        let addr: std::net::SocketAddr = RELAY_BIND.parse()?;
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok() {
+            return Ok(());
+        }
+        if Instant::now() > deadline {
+            bail!(
+                "relay did not start listening on {} within 30s; see {}",
+                RELAY_BIND,
+                relay_log.display()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn write_token_file(path: &Path, token: &str) -> anyhow::Result<()> {
+    let mut contents = token.to_string();
+    contents.push(char::from(10));
+    std::fs::write(path, contents)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to chmod {}", path.display()))?;
+    }
     Ok(())
 }
 
@@ -201,55 +388,69 @@ AUTHORITY {
         .replace("RELAY_BIND_ADDR", RELAY_BIND)
 }
 
-fn print_instructions(
-    app_origin: &str,
-    relay_authority: &str,
-    port: u16,
-    token: &str,
-    lan_mode: bool,
-    same_origin_relay: bool,
-    ca_cert_path: &Path,
-) {
+fn print_instructions(env: &RelayDevEnv, sharer_token_file: Option<&Path>) {
+    let app_origin = &env.app_origin;
+    let relay_authority = &env.relay_authority;
+    let port = env.https_port;
+    let token = &env.token;
     let line = "=".repeat(72);
     println!("\n{line}");
-    println!("zellij relay-dev is starting");
+    match sharer_token_file {
+        None => println!("zellij relay-dev is starting"),
+        Some(_) => println!("zellij relay-sharer-dev: relay + caddy are up, starting the sharer"),
+    }
     println!("{line}");
     println!("App origin (browser + native, ONE url):  {app_origin}");
     println!("Relay (browser, via caddy TLS):          wss://{relay_authority}");
     println!("Relay (sharer, direct):                  ws://{RELAY_BIND}");
     println!();
-    println!("1. Start a sharer in another terminal:");
-    println!();
-    println!("     ZELLIJ_RELAY_TUNNEL_AUTH_TOKEN={token} \\");
-    println!("       cargo x run -- options --relay-server-url ws://{RELAY_BIND}");
-    println!();
-    println!("2. Share it (Ctrl-o \u{2192} share, Online tab). The plugin prints ONE url,");
+    match sharer_token_file {
+        None => {
+            println!("1. Start a sharer in another terminal:");
+            println!();
+            println!("     ZELLIJ_RELAY_TUNNEL_AUTH_TOKEN={token} \\");
+            println!("       cargo x run -- options --relay-server-url ws://{RELAY_BIND}");
+            println!();
+        },
+        Some(token_file) => {
+            println!("1. The sharer zellij starts below with the relay url and the tunnel-auth");
+            println!("   token already set (token also saved to {}).", token_file.display());
+            println!();
+        },
+    }
+    println!("2. Share it (Ctrl-o \u{2192} s, Online tab, then l). The plugin prints ONE url,");
     println!("   the same shape as production \u{2014} used by both viewers:");
     println!("     {app_origin}/r/<slug>             (PIN share)");
     println!("     {app_origin}/r/<slug>#k=<secret>  (strong-code share)");
     println!();
     println!("3a. Browser: open that url in Firefox.");
-    println!("3b. Native:  the SAME url, no flags:");
+    println!("3b. Native:  the SAME url, no flags, in another terminal:");
     println!("     cargo x run -- attach \"{app_origin}/r/<slug>\"");
-    if lan_mode {
+    if env.lan_mode {
         println!();
         println!("LAN device access ({app_origin}):");
         println!("  - allow inbound TCP {port} in this machine's firewall");
         println!("  - install caddy's root CA on the device before opening the url:");
-        println!("      {}", ca_cert_path.display());
+        println!("      {}", env.ca_cert_path.display());
         println!("    Android: Settings \u{2192} Security & privacy \u{2192} Encryption & credentials");
         println!("             \u{2192} Install a certificate \u{2192} CA certificate");
         println!("             (Firefox Android additionally needs 'Use third-party CA");
         println!("             certificates' enabled in its settings)");
         println!("    iOS:     send the file, install the profile, then Settings \u{2192} General");
         println!("             \u{2192} About \u{2192} Certificate Trust Settings \u{2192} enable full trust");
-        if same_origin_relay {
+        if env.same_origin_relay {
             println!("  - IP-literal origin: app and relay share ONE origin; the viewer shows");
             println!("    the same-host security notice \u{2014} expected in this mode");
         }
     }
     println!();
-    println!("Ctrl-C stops both the relay and caddy.");
+    match sharer_token_file {
+        None => println!("Ctrl-C stops both the relay and caddy."),
+        Some(_) => {
+            println!("Exiting zellij (not detaching) stops the relay and caddy; detaching");
+            println!("also drops the share. Logs: {}/{{relay,caddy}}.log", env.dev_dir.display());
+        },
+    }
     println!("{line}\n");
 }
 

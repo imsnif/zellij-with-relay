@@ -158,6 +158,7 @@ fn main() -> anyhow::Result<()> {
         flags::XtaskCmd::Deprecated(_flags) => deprecation_notice(),
         flags::XtaskCmd::Build(flags) => build::build(shell, flags),
         flags::XtaskCmd::RelayDev(flags) => dev::relay_dev(shell, flags),
+        flags::XtaskCmd::RelaySharerDev(flags) => dev::relay_sharer_dev(shell, flags),
         flags::XtaskCmd::Format(flags) => format::format(shell, flags),
         flags::XtaskCmd::Test(flags) => test::test(shell, flags),
         flags::XtaskCmd::IntegrationTest(flags) => integration_test::integration_test(shell, flags),
