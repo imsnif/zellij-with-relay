@@ -23,11 +23,14 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "tim
 tower-http = { version = "0.6", features = ["cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = { workspace = true }
 uuid = { workspace = true }
 zellij-relay-protocol = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [dev-dependencies]
 serial_test = "3.0"
+tempfile = { workspace = true }
 tokio-tungstenite = "0.28"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies"] }
 

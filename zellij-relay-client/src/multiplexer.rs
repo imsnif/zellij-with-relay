@@ -93,9 +93,9 @@ pub async fn run_multiplexer(
     let terminal_writer = spawn_writer(terminal_sink, terminal_tunnel_rx, terminal_ping_rx);
 
     // Reader tasks: dispatch incoming frames and refresh activity marks.
-    let control_reader =
+    let mut control_reader =
         spawn_control_reader(state.clone(), control_stream, control_last_activity.clone());
-    let terminal_reader = spawn_terminal_reader(
+    let mut terminal_reader = spawn_terminal_reader(
         state.clone(),
         terminal_stream,
         terminal_last_activity.clone(),
@@ -113,33 +113,49 @@ pub async fn run_multiplexer(
         "terminal",
     );
 
-    let exit_reason = tokio::select! {
+    #[derive(Clone, Copy)]
+    enum ExitTrigger {
+        Shutdown,
+        ControlReader,
+        TerminalReader,
+        ControlHeartbeat,
+        TerminalHeartbeat,
+    }
+
+    let exit_trigger = tokio::select! {
         _ = shutdown_rx => {
             log::info!("Relay tunnel shutdown signal received");
-            MultiplexerExitReason::Shutdown
+            ExitTrigger::Shutdown
         }
-        _ = control_reader => {
+        _ = &mut control_reader => {
             log::warn!("Relay control socket closed");
-            MultiplexerExitReason::TunnelDropped
+            ExitTrigger::ControlReader
         }
-        _ = terminal_reader => {
+        _ = &mut terminal_reader => {
             log::warn!("Relay terminal socket closed");
-            MultiplexerExitReason::TunnelDropped
+            ExitTrigger::TerminalReader
         }
         _ = control_hb_tripped => {
             log::warn!(
                 "Relay control tunnel silent >{}s — tripping watchdog",
                 RELAY_HEARTBEAT_TIMEOUT_SECS
             );
-            MultiplexerExitReason::TunnelDropped
+            ExitTrigger::ControlHeartbeat
         }
         _ = terminal_hb_tripped => {
             log::warn!(
                 "Relay terminal tunnel silent >{}s — tripping watchdog",
                 RELAY_HEARTBEAT_TIMEOUT_SECS
             );
-            MultiplexerExitReason::TunnelDropped
+            ExitTrigger::TerminalHeartbeat
         }
+    };
+    let exit_reason = match exit_trigger {
+        ExitTrigger::Shutdown => MultiplexerExitReason::Shutdown,
+        ExitTrigger::ControlReader
+        | ExitTrigger::TerminalReader
+        | ExitTrigger::ControlHeartbeat
+        | ExitTrigger::TerminalHeartbeat => MultiplexerExitReason::TunnelDropped,
     };
 
     // Tear down all virtual clients. On reconnect the relay will
@@ -161,10 +177,39 @@ pub async fn run_multiplexer(
             .remove(&c.web_client_id);
     }
 
+    // Dropping a `JoinHandle` detaches its task. In particular, when the
+    // shutdown receiver wins the select above, detached reader tasks would
+    // retain the WebSocket stream halves and keep the relay-side tunnel alive.
+    // Abort and await every non-winning task so all socket halves are dropped
+    // before the supervisor reports that shutdown has completed.
     control_writer.abort();
     terminal_writer.abort();
     control_hb_handle.abort();
     terminal_hb_handle.abort();
+    let _ = tokio::join!(
+        control_writer,
+        terminal_writer,
+        control_hb_handle,
+        terminal_hb_handle
+    );
+
+    match exit_trigger {
+        ExitTrigger::ControlReader => {
+            terminal_reader.abort();
+            let _ = terminal_reader.await;
+        },
+        ExitTrigger::TerminalReader => {
+            control_reader.abort();
+            let _ = control_reader.await;
+        },
+        ExitTrigger::Shutdown
+        | ExitTrigger::ControlHeartbeat
+        | ExitTrigger::TerminalHeartbeat => {
+            control_reader.abort();
+            terminal_reader.abort();
+            let _ = tokio::join!(control_reader, terminal_reader);
+        },
+    }
     exit_reason
 }
 
@@ -1724,6 +1769,104 @@ pub(crate) mod test_support {
             },
         );
         ctrl_out_rx
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use std::time::Duration;
+
+    use futures_util::StreamExt;
+    use tokio::net::TcpListener;
+    use tokio::sync::{mpsc, oneshot};
+    use tokio_tungstenite::{accept_async, connect_async};
+
+    use super::test_support::make_state;
+    use super::{
+        run_multiplexer, ControlTunnelSession, MultiplexerExitReason, TerminalTunnelSession,
+    };
+
+    #[tokio::test]
+    async fn explicit_shutdown_closes_both_peer_websockets() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (control_closed_tx, control_closed_rx) = oneshot::channel();
+        let (terminal_closed_tx, terminal_closed_rx) = oneshot::channel();
+
+        let peer = tokio::spawn(async move {
+            let (control_tcp, _) = listener.accept().await.unwrap();
+            let mut control = accept_async(control_tcp).await.unwrap();
+            let control_monitor = tokio::spawn(async move {
+                while let Some(frame) = control.next().await {
+                    if frame.is_err() {
+                        break;
+                    }
+                }
+                let _ = control_closed_tx.send(());
+            });
+
+            let (terminal_tcp, _) = listener.accept().await.unwrap();
+            let mut terminal = accept_async(terminal_tcp).await.unwrap();
+            let terminal_monitor = tokio::spawn(async move {
+                while let Some(frame) = terminal.next().await {
+                    if frame.is_err() {
+                        break;
+                    }
+                }
+                let _ = terminal_closed_tx.send(());
+            });
+
+            let _ = tokio::join!(control_monitor, terminal_monitor);
+        });
+
+        let (control_ws, _) = connect_async(format!("ws://{addr}/control")).await.unwrap();
+        let (control_sink, control_stream) = control_ws.split();
+        let control = ControlTunnelSession {
+            public_url: "http://localhost/r/test".to_string(),
+            slug: "test".to_string(),
+            tunnel_id: "tunnel-test".to_string(),
+            terminal_binding_secret: "a".repeat(64),
+            sink: control_sink,
+            stream: control_stream,
+        };
+
+        let (terminal_ws, _) = connect_async(format!("ws://{addr}/terminal"))
+            .await
+            .unwrap();
+        let (terminal_sink, terminal_stream) = terminal_ws.split();
+        let terminal = TerminalTunnelSession {
+            sink: terminal_sink,
+            stream: terminal_stream,
+        };
+
+        let (state, control_tunnel_rx) = make_state();
+        let (_terminal_tunnel_tx, terminal_tunnel_rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let multiplexer = tokio::spawn(run_multiplexer(
+            state,
+            control,
+            terminal,
+            control_tunnel_rx,
+            terminal_tunnel_rx,
+            shutdown_rx,
+        ));
+
+        shutdown_tx.send(()).unwrap();
+        let exit = tokio::time::timeout(Duration::from_secs(1), multiplexer)
+            .await
+            .expect("multiplexer did not stop promptly")
+            .expect("multiplexer task panicked");
+        assert_eq!(exit, MultiplexerExitReason::Shutdown);
+
+        tokio::time::timeout(Duration::from_secs(1), control_closed_rx)
+            .await
+            .expect("control peer did not observe socket closure")
+            .expect("control closure notifier dropped");
+        tokio::time::timeout(Duration::from_secs(1), terminal_closed_rx)
+            .await
+            .expect("terminal peer did not observe socket closure")
+            .expect("terminal closure notifier dropped");
+        peer.await.unwrap();
     }
 }
 

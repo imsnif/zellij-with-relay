@@ -21,6 +21,7 @@ pub fn test(sh: &Shell, flags: flags::Test) -> anyhow::Result<()> {
             wasm_clip: false,
             app_origin: None,
             app_host: None,
+            relay_origin: None,
         },
     )
     .context(err_context)?;

@@ -43,16 +43,28 @@ async fn async_main() -> anyhow::Result<()> {
         )
         .init();
 
-    let cfg = config::RelayConfig::from_env();
+    let cfg = config::RelayConfig::from_env()?;
     tracing::info!(
         bind = %cfg.bind_addr,
         public_url_template = %cfg.public_url_template,
         allowed_origins = ?cfg.allowed_origins,
         "starting zellij-relay"
     );
-
-    let app_state =
+    let mut app_state =
         router::AppState::new(cfg.public_url_template.clone(), cfg.allowed_origins.clone());
+    if let Some(control_plane) = &cfg.control_plane {
+        tracing::info!("hosted mode: tunnel auth via control plane");
+        let client = zellij_relay_server::control_plane::ControlPlaneClient::from_config(control_plane);
+        app_state = app_state.with_backends(
+            zellij_relay_server::tunnel_auth::TunnelAuthBackend::online(client.clone()),
+            zellij_relay_server::events::EventSink::spawn_online(
+                client,
+                zellij_relay_server::events::EventSenderConfig::default(),
+            ),
+        );
+    } else {
+        tracing::info!("standalone mode: tunnel auth via local sqlite token store");
+    }
     let app = router::build_router(app_state);
 
     let addr: SocketAddr = cfg

@@ -4,7 +4,20 @@ This directory documents how to deploy the **app origin** — the static site th
 serves the browser viewer. It is a plain static site built by:
 
 ```sh
-cargo x build --app-origin out/
+cargo x build \
+  --app-origin out/ \
+  --app-host app.example.com
+```
+
+By default the viewer targets `https://relay.<app-host>`. Deployments whose app
+and relay do not follow that paired-domain convention can pin a separate relay
+origin at build time:
+
+```sh
+cargo x build \
+  --app-origin out/ \
+  --app-host viewer-project.pages.dev \
+  --relay-origin https://relay.example.com
 ```
 
 The app origin serves *only* viewer code (HTML/JS/wasm/css/icons). It performs
@@ -25,8 +38,11 @@ into an unversioned **handshake core** and a versioned **application bundle**:
 
 - `out/index.html` — the core bootstrap shell. Placeholders resolved
   (`BASE_URL=/`, `AUTH_MODE=relay`, `EXPECTED_E2E=true`), a
-  `<meta http-equiv="Content-Security-Policy">` baked in as a fallback, and
-  `integrity="sha384-…" crossorigin="anonymous"` injected on every
+  `<meta http-equiv="Content-Security-Policy">` baked in as a fallback, and a
+  trusted `<meta name="zellij-relay-origin">` containing the validated
+  build-time HTTP origin. The browser derives the matching WebSocket origin
+  from this value; share-link query and fragment data cannot override it. The
+  file also has `integrity="sha384-…" crossorigin="anonymous"` on every
   `<script src="assets/…">` and stylesheet `<link href="assets/…">`.
 - `out/assets/…` — the **handshake core** only: bootstrap/loader, SPAKE2 + AEAD
   crypto (`crypto.js`, `relay_crypto.wasm`, `integrity.js`), URL parsing, modals,
@@ -36,10 +52,9 @@ into an unversioned **handshake core** and a versioned **application bundle**:
 - `out/assets/integrity.js` — generated wasm integrity manifest for the core
   (`relay_crypto.wasm`); the JS loader verifies fetched wasm bytes against it
   before `WebAssembly.instantiate` (SRI cannot ride a `fetch()`).
-- `out/v/<version>/assets/…` — the **application bundle** for this release:
-  `app-entry.js`, `websockets.js`, `terminal.js`, the xterm library + addons,
-  `clip.js`/`clip.wasm`, input handling, etc. Everything that drifts between
-  releases lives here.
+- `out/v/<version>/assets/app.js` — the consolidated, versioned application
+  bundle for this release, accompanied by xterm assets/addons and `clip.wasm`.
+  Everything that drifts between releases lives below this versioned path.
 - `out/v/<version>/app-manifest.json` — `[{ "name", "integrity" }]` over the
   application assets. The core fetches it, recomputes a rolled-up digest, and
   requires it to equal the digest the sharer attests over the E2E control
@@ -50,8 +65,14 @@ into an unversioned **handshake core** and a versioned **application bundle**:
 - `out/v/<version>/assets/integrity.js` — wasm integrity manifest for the
   bundle (`clip.wasm`).
 - `out/RELEASE_HASHES.txt` — `sha256sum -c`-compatible manifest of every served
-  file (core + `v/<version>/…`). Published as a GitHub release asset; used by
-  the verification recipe.
+  viewer file (core + `v/<version>/…`). Published as a GitHub release asset;
+  used by the verification recipe. Static-host configuration files are
+  intentionally excluded because hosts such as Cloudflare Pages consume them
+  as configuration rather than serving them at those paths.
+- `out/_redirects` and `out/_headers` — generated static-host configuration for
+  the `/r/*` SPA rewrite and security headers. Cloudflare Pages and compatible
+  hosts consume them; other static hosts may ignore them and configure the
+  equivalent behavior separately.
 
 A single `cargo x build --app-origin out/` clears `out/` and emits only the
 **current** release's core + `v/<version>/`. Accumulation of older bundles
@@ -89,7 +110,7 @@ host **should also send these as real HTTP response headers**. Some directives
 headers:
 
 ```
-Content-Security-Policy: default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://relay.zellij.online wss://relay.zellij.online; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'
+Content-Security-Policy: default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://relay.example.com wss://relay.example.com; manifest-src 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'
 Strict-Transport-Security: max-age=63072000; includeSubDomains
 X-Content-Type-Options: nosniff
 X-Frame-Options: DENY
@@ -99,11 +120,18 @@ Referrer-Policy: no-referrer
 Notes:
 - `'wasm-unsafe-eval'` is required to instantiate the SPAKE2/clip wasm.
 - `style-src 'unsafe-inline'` is required by xterm.js.
+- `base-uri 'self'` permits the generated `<base href="/">` needed when the
+  viewer shell is served from `/r/<slug>`, while still rejecting cross-origin
+  base URLs.
 - `connect-src` names only the app origin and the deployment's relay host.
-  The baked `<meta>` pins the relay derived from the host passed at stage
-  time (`cargo x build --app-origin out/ --app-host <your-host>`, default
-  `zellij.online`). Self-hosted origins **must** stage with their own
-  `--app-host` or the viewer cannot reach their relay.
+  The baked CSP and browser runtime metadata are generated from the same
+  validated relay configuration. Without `--relay-origin`, the relay is
+  derived from the host passed at stage time (`--app-host <your-host>`, default
+  `zellij.online`). Self-hosted origins **must** stage with their own app host
+  or explicit relay origin.
+- Remote explicit relay origins must use `https://` or `wss://`. HTTP/WS is
+  accepted only for loopback development. Credentials, non-root paths,
+  queries, fragments, malformed hosts, and ambiguous ports are rejected.
 
 ## Per-release pinning and verification
 
@@ -126,33 +154,21 @@ This is the reference deployment.
 1. **Build the artifact:**
 
    ```sh
-   cargo x build --app-origin out/
+   cargo x build \
+     --app-origin out/ \
+     --app-host viewer-project.pages.dev \
+     --relay-origin https://relay.example.com
    ```
 
-2. **Ship host config inside the artifact.** Cloudflare Pages reads `_redirects`
-   and `_headers` from the published directory.
-
-   `out/_redirects`:
-
-   ```
-   /r/*  /index.html  200
-   ```
-
-   `out/_headers`:
-
-   ```
-   /*
-     Content-Security-Policy: default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://relay.zellij.online wss://relay.zellij.online; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'
-     Strict-Transport-Security: max-age=63072000; includeSubDomains
-     X-Content-Type-Options: nosniff
-     X-Frame-Options: DENY
-     Referrer-Policy: no-referrer
-   ```
-
-   The header-level `connect-src` matches the baked `<meta>`: only the app
-   origin plus the deployment's relay host are reachable. There is no relay
-   override — the relay host is always `relay.<app-host>`, so a crafted link
-   cannot point the viewer's connection anywhere else.
+2. **Publish the generated host config.** Cloudflare Pages reads `_redirects`
+   and `_headers` directly from the output directory. The header-level
+   `connect-src`, baked CSP, and trusted runtime target all come from the same
+   build-time relay configuration. A crafted share link cannot change them.
+   These two configuration files are intentionally absent from
+   `RELEASE_HASHES.txt`; verify them through deployed behavior instead: request
+   `/r/test-slug`, confirm it serves `index.html`, and inspect the response for
+   the generated CSP, HSTS, `nosniff`, frame-denial, and referrer-policy
+   headers.
 
 3. **Deploy:**
 

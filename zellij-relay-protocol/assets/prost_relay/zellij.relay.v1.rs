@@ -4,9 +4,6 @@
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TunnelAuth {
-    /// relay tunnel auth token (sharer → relay)
-    #[prost(string, tag="1")]
-    pub token: ::prost::alloc::string::String,
     #[prost(string, tag="2")]
     pub session_name: ::prost::alloc::string::String,
     #[prost(uint32, tag="3")]
@@ -26,6 +23,18 @@ pub struct TunnelAuth {
     /// viewers opens two tunnels.
     #[prost(bool, tag="6")]
     pub read_only: bool,
+    #[prost(oneof="tunnel_auth::Credential", tags="1")]
+    pub credential: ::core::option::Option<tunnel_auth::Credential>,
+}
+/// Nested message and enum types in `TunnelAuth`.
+pub mod tunnel_auth {
+    #[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Credential {
+        /// stage 2 bearer; stage 3 adds a variant here
+        #[prost(string, tag="1")]
+        Token(::prost::alloc::string::String),
+    }
 }
 /// Relay response to a successful TunnelAuth.
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -37,6 +46,11 @@ pub struct TunnelEstablished {
     pub slug: ::prost::alloc::string::String,
     #[prost(string, tag="3")]
     pub tunnel_id: ::prost::alloc::string::String,
+    /// Relay-generated, per-tunnel secret the client must present on the
+    /// terminal socket. Valid for this tunnel's lifetime only; replaces
+    /// re-presenting the account credential on /tunnel/terminal.
+    #[prost(string, tag="4")]
+    pub terminal_binding_secret: ::prost::alloc::string::String,
 }
 /// Error surface on either the control or the terminal tunnel. `message` is a
 /// human-readable diagnostic only; receivers key off `code`. For
@@ -63,8 +77,9 @@ pub struct TunnelError {
 pub struct TunnelReady {
     #[prost(string, tag="1")]
     pub tunnel_id: ::prost::alloc::string::String,
+    /// was: string token = 2 (account credential)
     #[prost(string, tag="2")]
-    pub token: ::prost::alloc::string::String,
+    pub binding_secret: ::prost::alloc::string::String,
 }
 /// Relay → Zellij: a viewer has begun a SPAKE2 password-authenticated key
 /// exchange. `viewer_msg` is the viewer's opaque SPAKE2 message; the relay
@@ -219,6 +234,10 @@ pub enum TunnelErrorCode {
     MissingSlug = 5,
     UnknownSlug = 6,
     TunnelIdMismatch = 7,
+    /// Terminal socket presented a bad/absent terminal binding secret. Distinct
+    /// from AUTH_REJECTED: it signals a linking bug/attack, not bad account
+    /// credentials, and must NOT trigger the sharer plugin's auth-rejected UX.
+    TerminalBindingRejected = 8,
 }
 impl TunnelErrorCode {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -235,6 +254,7 @@ impl TunnelErrorCode {
             TunnelErrorCode::MissingSlug => "MISSING_SLUG",
             TunnelErrorCode::UnknownSlug => "UNKNOWN_SLUG",
             TunnelErrorCode::TunnelIdMismatch => "TUNNEL_ID_MISMATCH",
+            TunnelErrorCode::TerminalBindingRejected => "TERMINAL_BINDING_REJECTED",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -248,6 +268,7 @@ impl TunnelErrorCode {
             "MISSING_SLUG" => Some(Self::MissingSlug),
             "UNKNOWN_SLUG" => Some(Self::UnknownSlug),
             "TUNNEL_ID_MISMATCH" => Some(Self::TunnelIdMismatch),
+            "TERMINAL_BINDING_REJECTED" => Some(Self::TerminalBindingRejected),
             _ => None,
         }
     }

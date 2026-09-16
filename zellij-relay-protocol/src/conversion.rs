@@ -26,6 +26,10 @@ pub enum TunnelErrorCode {
     MissingSlug,
     UnknownSlug,
     TunnelIdMismatch,
+    /// Terminal socket presented a bad/absent binding secret. Distinct from
+    /// `AuthRejected` — signals a linking bug/attack, not bad account
+    /// credentials, and must not trigger the sharer plugin's auth-rejected UX.
+    TerminalBindingRejected,
 }
 
 impl TunnelErrorCode {
@@ -47,6 +51,9 @@ impl TunnelErrorCode {
             proto::TunnelErrorCode::MissingSlug => TunnelErrorCode::MissingSlug,
             proto::TunnelErrorCode::UnknownSlug => TunnelErrorCode::UnknownSlug,
             proto::TunnelErrorCode::TunnelIdMismatch => TunnelErrorCode::TunnelIdMismatch,
+            proto::TunnelErrorCode::TerminalBindingRejected => {
+                TunnelErrorCode::TerminalBindingRejected
+            },
         }
     }
 
@@ -88,13 +95,16 @@ impl TunnelErrorCode {
             TunnelErrorCode::TunnelIdMismatch => {
                 err.code = proto::TunnelErrorCode::TunnelIdMismatch as i32;
             },
+            TunnelErrorCode::TerminalBindingRejected => {
+                err.code = proto::TunnelErrorCode::TerminalBindingRejected as i32;
+            },
         }
         err
     }
 }
 
 /// High-level Rust view of a control-tunnel frame.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum ControlMessage {
     Auth {
         token: String,
@@ -112,6 +122,7 @@ pub enum ControlMessage {
         public_url: String,
         slug: String,
         tunnel_id: String,
+        terminal_binding_secret: String,
     },
     Error {
         message: String,
@@ -153,11 +164,11 @@ pub enum ControlMessage {
 }
 
 /// High-level Rust view of a terminal-tunnel frame.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum TerminalMessage {
     Ready {
         tunnel_id: String,
-        token: String,
+        binding_secret: String,
     },
     Error {
         message: String,
@@ -181,6 +192,127 @@ impl TerminalMessage {
     pub fn encode(&self) -> Vec<u8> {
         let frame: proto::TerminalFrame = self.clone().into();
         frame.encode_to_vec()
+    }
+}
+
+// Manual Debug impls: these messages carry secrets (`Auth.token`,
+// `Established.terminal_binding_secret`, `Ready.binding_secret`) that must
+// never reach logs via a stray `{:?}` (e.g. `tracing::warn!(?other, ...)`
+// on an unexpected-message branch). Every other variant/field prints as the
+// derived impl would. The non-secret `Error.code` prints normally.
+impl std::fmt::Debug for ControlMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ControlMessage::Auth {
+                token: _,
+                session_name,
+                protocol_version,
+                zellij_version,
+                requested_slug,
+                read_only,
+            } => f
+                .debug_struct("Auth")
+                .field("token", &"<redacted>")
+                .field("session_name", session_name)
+                .field("protocol_version", protocol_version)
+                .field("zellij_version", zellij_version)
+                .field("requested_slug", requested_slug)
+                .field("read_only", read_only)
+                .finish(),
+            ControlMessage::Established {
+                public_url,
+                slug,
+                tunnel_id,
+                terminal_binding_secret: _,
+            } => f
+                .debug_struct("Established")
+                .field("public_url", public_url)
+                .field("slug", slug)
+                .field("tunnel_id", tunnel_id)
+                .field("terminal_binding_secret", &"<redacted>")
+                .finish(),
+            ControlMessage::Error { message, code } => f
+                .debug_struct("Error")
+                .field("message", message)
+                .field("code", code)
+                .finish(),
+            ControlMessage::PakeChallenge {
+                request_id,
+                viewer_msg,
+                link_id,
+            } => f
+                .debug_struct("PakeChallenge")
+                .field("request_id", request_id)
+                .field("viewer_msg", viewer_msg)
+                .field("link_id", link_id)
+                .finish(),
+            ControlMessage::PakeResponse {
+                request_id,
+                client_id,
+                accepted,
+                sharer_msg,
+                sharer_confirm,
+            } => f
+                .debug_struct("PakeResponse")
+                .field("request_id", request_id)
+                .field("client_id", client_id)
+                .field("accepted", accepted)
+                .field("sharer_msg", sharer_msg)
+                .field("sharer_confirm", sharer_confirm)
+                .finish(),
+            ControlMessage::PakeConfirm {
+                request_id,
+                viewer_confirm,
+            } => f
+                .debug_struct("PakeConfirm")
+                .field("request_id", request_id)
+                .field("viewer_confirm", viewer_confirm)
+                .finish(),
+            ControlMessage::PakeResult {
+                request_id,
+                client_id,
+                accepted,
+            } => f
+                .debug_struct("PakeResult")
+                .field("request_id", request_id)
+                .field("client_id", client_id)
+                .field("accepted", accepted)
+                .finish(),
+            ControlMessage::ClientDisconnected { client_id } => f
+                .debug_struct("ClientDisconnected")
+                .field("client_id", client_id)
+                .finish(),
+            ControlMessage::ControlFrameData { client_id, data } => f
+                .debug_struct("ControlFrameData")
+                .field("client_id", client_id)
+                .field("data", data)
+                .finish(),
+        }
+    }
+}
+
+impl std::fmt::Debug for TerminalMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TerminalMessage::Ready {
+                tunnel_id,
+                binding_secret: _,
+            } => f
+                .debug_struct("Ready")
+                .field("tunnel_id", tunnel_id)
+                .field("binding_secret", &"<redacted>")
+                .finish(),
+            TerminalMessage::Error { message, code } => f
+                .debug_struct("Error")
+                .field("message", message)
+                .field("code", code)
+                .finish(),
+            TerminalMessage::TerminalFrameData { client_id, data } => f
+                .debug_struct("TerminalFrameData")
+                .field("client_id", client_id)
+                .field("data", data)
+                .finish(),
+        }
     }
 }
 
@@ -208,7 +340,7 @@ impl From<ControlMessage> for proto::ControlFrame {
                 requested_slug,
                 read_only,
             } => Payload::Auth(proto::TunnelAuth {
-                token,
+                credential: Some(proto::tunnel_auth::Credential::Token(token)),
                 session_name,
                 protocol_version,
                 zellij_version,
@@ -219,10 +351,12 @@ impl From<ControlMessage> for proto::ControlFrame {
                 public_url,
                 slug,
                 tunnel_id,
+                terminal_binding_secret,
             } => Payload::Established(proto::TunnelEstablished {
                 public_url,
                 slug,
                 tunnel_id,
+                terminal_binding_secret,
             }),
             ControlMessage::Error { message, code } => {
                 Payload::Error(code.to_proto_error(message))
@@ -284,18 +418,25 @@ impl TryFrom<proto::ControlFrame> for ControlMessage {
     fn try_from(frame: proto::ControlFrame) -> Result<Self> {
         use proto::control_frame::Payload;
         match frame.payload {
-            Some(Payload::Auth(a)) => Ok(ControlMessage::Auth {
-                token: a.token,
-                session_name: a.session_name,
-                protocol_version: a.protocol_version,
-                zellij_version: a.zellij_version,
-                requested_slug: a.requested_slug,
-                read_only: a.read_only,
-            }),
+            Some(Payload::Auth(a)) => {
+                let token = match a.credential {
+                    Some(proto::tunnel_auth::Credential::Token(t)) => t,
+                    None => return Err(anyhow!("TunnelAuth missing credential")),
+                };
+                Ok(ControlMessage::Auth {
+                    token,
+                    session_name: a.session_name,
+                    protocol_version: a.protocol_version,
+                    zellij_version: a.zellij_version,
+                    requested_slug: a.requested_slug,
+                    read_only: a.read_only,
+                })
+            },
             Some(Payload::Established(e)) => Ok(ControlMessage::Established {
                 public_url: e.public_url,
                 slug: e.slug,
                 tunnel_id: e.tunnel_id,
+                terminal_binding_secret: e.terminal_binding_secret,
             }),
             Some(Payload::Error(e)) => Ok(ControlMessage::Error {
                 code: TunnelErrorCode::from_proto(&e),
@@ -340,9 +481,13 @@ impl From<TerminalMessage> for proto::TerminalFrame {
     fn from(msg: TerminalMessage) -> Self {
         use proto::terminal_frame::Payload;
         let payload = match msg {
-            TerminalMessage::Ready { tunnel_id, token } => {
-                Payload::Ready(proto::TunnelReady { tunnel_id, token })
-            },
+            TerminalMessage::Ready {
+                tunnel_id,
+                binding_secret,
+            } => Payload::Ready(proto::TunnelReady {
+                tunnel_id,
+                binding_secret,
+            }),
             TerminalMessage::Error { message, code } => {
                 Payload::Error(code.to_proto_error(message))
             },
@@ -364,7 +509,7 @@ impl TryFrom<proto::TerminalFrame> for TerminalMessage {
         match frame.payload {
             Some(Payload::Ready(r)) => Ok(TerminalMessage::Ready {
                 tunnel_id: r.tunnel_id,
-                token: r.token,
+                binding_secret: r.binding_secret,
             }),
             Some(Payload::Error(e)) => Ok(TerminalMessage::Error {
                 code: TunnelErrorCode::from_proto(&e),

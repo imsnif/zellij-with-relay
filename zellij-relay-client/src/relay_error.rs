@@ -39,12 +39,17 @@ pub fn failure_reason_for(code: &TunnelErrorCode) -> RelayFailureReason {
             supported_max: *supported_max,
             offered_version: *offered_version,
         },
+        // Terminal binding failure signals a linking bug/stale-binary or an
+        // attack on the terminal socket, not a bad account credential — it must
+        // NOT surface as the plugin's auth-rejected UX, so it maps to the
+        // generic unreachable/retry path.
         TunnelErrorCode::Unspecified
         | TunnelErrorCode::MalformedFrame
         | TunnelErrorCode::UnexpectedFrame
         | TunnelErrorCode::MissingSlug
         | TunnelErrorCode::UnknownSlug
-        | TunnelErrorCode::TunnelIdMismatch => RelayFailureReason::Unreachable,
+        | TunnelErrorCode::TunnelIdMismatch
+        | TunnelErrorCode::TerminalBindingRejected => RelayFailureReason::Unreachable,
     }
 }
 

@@ -1,7 +1,18 @@
 # zellij-relay testbed deployment
 
-One-command deploy of the relay behind nginx + Let's Encrypt on an OVHCloud
-VPS, driven entirely from your laptop via an SSH docker context.
+One-command deploy of the relay behind nginx + Let's Encrypt on a VPS, driven
+entirely from your laptop via an SSH Docker context.
+
+The deployment supports two authentication modes:
+
+| Mode | Tunnel credential source | Deployment input |
+| --- | --- | --- |
+| `standalone` (default) | Local SQLite token store on the relay | No additional configuration |
+| `hosted` | HTTPS control-plane API | Control-plane URL and service-secret file |
+
+Standalone remains the default so the open-source relay can be self-hosted
+without the zellij.online website. Hosted mode is an explicit overlay; it does
+not change the standalone image or token store.
 
 This deploy provisions the **relay host only** (`relay.zellij.online`), which
 is **transport-only**: it serves `/health`, `/tunnel/*`, and the per-slug
@@ -60,6 +71,8 @@ on the VPS.
 
 ## Deploy
 
+### Standalone self-hosting
+
 ```sh
 cd zellij-relay-server/deploy
 
@@ -70,6 +83,32 @@ cd zellij-relay-server/deploy
 
 `deploy` is the default command, so `./deploy.sh --vps-user … --le-email …`
 works too.
+
+### Hosted control plane
+
+Hosted mode validates each tunnel credential with an HTTPS control plane and
+sends tunnel lifecycle events to it. Put the shared service secret in a
+non-empty file **outside the repository/build context**, then run:
+
+```sh
+./deploy.sh deploy \
+    --mode hosted \
+    --control-plane-url https://control-plane.example.com \
+    --control-plane-secret-file /secure/path/relay-service-secret \
+    --vps-user root \
+    --le-email you@example.com
+```
+
+The script streams the secret over the Docker SSH connection into the external
+`zellij-relay_control-plane-secret` volume. Inside the relay it is mounted
+read-only at `/run/secrets/relay-control-plane` and read through
+`RELAY_CONTROL_PLANE_SECRET_FILE`. The secret is not placed in the image,
+container environment, Compose configuration, command arguments, or logs.
+
+The URL must use HTTPS. Both hosted arguments are mandatory, and partial
+configuration fails before the running stack is replaced. Once a hosted relay
+is running, an unqualified `deploy` is rejected; pass `--mode hosted` to update
+it or explicitly pass `--mode standalone` to switch authentication modes.
 
 Both the SSH/deploy target (`--vps-ip`) and the relay host (`--public-host`)
 default to `relay.zellij.online` — the relay host clients use by default. Point
@@ -119,7 +158,9 @@ this step can be skipped entirely when deploying to the default relay host.
 alias zr='./deploy.sh --vps-user root'
 zr logs
 zr ps
-zr deploy --le-email you@example.com
+zr deploy --le-email you@example.com                 # standalone
+zr deploy --mode hosted --control-plane-url https://control-plane.example.com \
+  --control-plane-secret-file /secure/relay-secret --le-email you@example.com
 ```
 
 ## Use
@@ -139,9 +180,9 @@ In a Zellij session on your laptop:
 
 ## Tunnel auth tokens
 
-The relay rejects any `TunnelAuth` whose `token` hash is not in its
-on-disk store, so operators must mint one on the relay host and
-configure the sharer's Zellij to send it.
+In standalone mode, the relay rejects any `TunnelAuth` whose token hash is not
+in its on-disk store. In hosted mode, it validates the credential with the
+configured control plane and fails closed if verification cannot complete.
 
 ### Manage tokens on the relay host
 
@@ -163,6 +204,10 @@ is awkward in your shell.
 
 `create-token` prints the raw token **once** — store it securely. Only
 the SHA-256 hash is written to disk.
+
+These three commands intentionally fail with guidance when the running relay
+uses hosted mode. Create and revoke hosted credentials through the control
+plane instead.
 
 ### Configure Zellij to use the token
 
@@ -271,12 +316,42 @@ sessions on the VPS. The compose project name is fixed at `zellij-relay`.
 
 ## Redeploying after code changes
 
+Standalone:
+
 ```sh
 ./deploy.sh --vps-user root --le-email you@zellij.online
 ```
 
-(Rebuilds images, rolls containers. Cert bootstrap is a no-op when the
-cert already exists.)
+Hosted:
+
+```sh
+./deploy.sh --mode hosted \
+    --control-plane-url https://control-plane.example.com \
+    --control-plane-secret-file /secure/relay-service-secret \
+    --vps-user root --le-email you@zellij.online
+```
+
+Both commands rebuild the current local checkout and recreate the containers.
+Certificate bootstrap is a no-op when the certificate already exists. Active
+tunnels disconnect during the recreation.
+
+### Hosted service-secret rotation
+
+1. Configure the control plane to accept both the old and new service secrets.
+2. Store the new secret in a protected local file outside this repository.
+3. Redeploy in hosted mode using the new file.
+4. Verify tunnel creation, rejection, revocation, and lifecycle events.
+5. Remove the old secret from the control plane.
+
+The volume update is atomic: an interrupted write leaves the previously
+installed secret available. Ordinary redeploys preserve the volume.
+
+### Rollback
+
+Check out the previously working commit and rerun the same deployment mode.
+The certificate, standalone token database, and hosted secret volumes survive
+container recreation. Do not use `destroy` for rollback: it deliberately
+deletes all three after an explicit confirmation.
 
 ## Hostname / IP changes
 
@@ -301,12 +376,13 @@ and `traefik.me` are drop-in alternatives.
 | File | Role |
 | --- | --- |
 | `Dockerfile` | Multi-stage build of the `zellij-relay-server` binary |
-| `Dockerfile.dockerignore` | Keeps the SSH context upload small |
+| `Dockerfile.dockerignore` | Keeps the SSH context small and excludes local secret material |
 | `nginx/Dockerfile` | Bakes the relay host (`PUBLIC_HOST`) into `nginx.conf` via `envsubst` |
 | `nginx/nginx.conf.template` | TLS termination, WS upgrade, transport-only rate limits |
 | `nginx/proxy-ws.conf` | Shared proxy + upgrade snippet |
-| `compose.yml` | `relay`, `nginx`, `certbot` services + two named volumes |
-| `deploy.sh` | One-click deploy, logs, restart, destroy |
+| `compose.yml` | Standalone `relay`, `nginx`, and `certbot` stack |
+| `compose.hosted.yml` | Hosted-only control-plane environment and secret-volume overlay |
+| `deploy.sh` | One-click standalone/hosted deploy, logs, restart, token management, destroy |
 | `bootstrap-cert.sh` | Idempotent LetsEncrypt bootstrap (used by `deploy.sh`) |
 | `print-spki.sh` | Print the SPKI SHA-256 pin (`sha256//…`) from the live cert |
 
@@ -326,9 +402,20 @@ After `deploy.sh` reports healthy:
    - CORS preflight (`OPTIONS`) to the relay succeeds and carries the relay's
      `Access-Control-Allow-Origin: https://zellij.online` (no nginx
      duplication).
-4. `./deploy.sh logs relay` during the session:
+4. `./deploy.sh logs --service relay --vps-user root` during the session:
    - `ClientConnected` on tab open.
    - `ClientDisconnected` on tab close.
 5. Press `I` in the plugin → both tunnel WS close cleanly in the relay log.
 6. Confirm ciphertext on the wire: `websocat wss://relay.zellij.online/...`
    shows opaque bytes, not session contents.
+
+Authentication-mode checks:
+
+- Standalone: create a local token, open a tunnel with it, revoke it, and
+  confirm the next tunnel attempt is rejected.
+- Hosted: create a control-plane credential, confirm the tunnel appears and
+  disappears in the control plane, revoke it, and confirm the next attempt is
+  rejected. Temporarily make the control plane unavailable and confirm tunnel
+  creation fails closed.
+- Hosted secret hygiene: inspect the relay container environment, image
+  history, and logs and confirm the service-secret value is absent.

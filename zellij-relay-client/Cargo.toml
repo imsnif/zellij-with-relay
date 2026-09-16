@@ -19,7 +19,7 @@ notify = { workspace = true, optional = true }
 zellij-browser-bridge = { workspace = true, optional = true }
 zellij-relay-protocol = { workspace = true, optional = true }
 zellij-web-client-assets = { workspace = true, optional = true }
-tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"], optional = true }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"], optional = true }
 futures-util = { version = "0.3", optional = true }
 isahc = { workspace = true, optional = true }
 url = { workspace = true, optional = true }

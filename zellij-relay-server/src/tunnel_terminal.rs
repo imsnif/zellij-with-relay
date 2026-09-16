@@ -2,8 +2,10 @@
 //!
 //! The Zellij instance connects here after receiving `TunnelEstablished`,
 //! passing the slug as a `?slug=...` query parameter, and sends a
-//! `TerminalMessage::Ready { tunnel_id }` as its first frame. After the
-//! handshake the socket is split:
+//! `TerminalMessage::Ready { tunnel_id, binding_secret }` as its first frame,
+//! presenting the relay-generated secret from `TunnelEstablished` (not the
+//! account credential — see decision #1 in the hosted-control-plane plan).
+//! After the handshake the socket is split:
 //!
 //! - Writer task drains `entry.terminal_tx` → encoded `TerminalMessage`
 //!   bytes pushed into the sink.
@@ -26,9 +28,7 @@ use tokio::sync::mpsc;
 use zellij_relay_protocol::{decode_terminal_frame, TerminalMessage, TunnelErrorCode};
 
 use crate::heartbeat::{now_millis, spawn_server_heartbeat, HEARTBEAT_TIMEOUT_SECS};
-use crate::relay_tunnel_auth_tokens::{
-    hash_relay_tunnel_auth_token, validate_relay_tunnel_auth_token_hash,
-};
+use crate::registry::hash_terminal_binding_secret;
 use crate::router::AppState;
 
 pub async fn handler(
@@ -93,27 +93,39 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, slug: String) {
             return;
         },
     };
+    // `first` is the raw serialized ready frame — it holds a plaintext copy of
+    // the terminal binding secret. Drop it now so it does not linger for the
+    // whole socket lifetime.
+    drop(first);
 
     match msg {
-        TerminalMessage::Ready { tunnel_id, token } if tunnel_id == entry.tunnel_id.to_string() => {
-            let hash = hash_relay_tunnel_auth_token(&token);
-            let accepted = match validate_relay_tunnel_auth_token_hash(&hash) {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::error!(error = %e, "relay_tunnel_auth_tokens DB error; rejecting tunnel");
-                    false
-                },
-            };
+        TerminalMessage::Ready {
+            tunnel_id,
+            binding_secret,
+        } if tunnel_id == entry.tunnel_id.to_string() => {
+            // Binding-secret check only — no backend, no sqlite. The relay
+            // always issues 64 lowercase hex chars; a non-matching shape is a
+            // cheap reject before the hash compare. Timing on the compare is
+            // not a useful oracle: it is over SHA-256 digests of a 32-byte
+            // random secret, so a leaked comparison prefix reveals nothing
+            // grindable. The account credential never touches this socket
+            // (decision #1).
+            let shape_ok = binding_secret.len() == 64
+                && binding_secret
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+            let accepted = shape_ok
+                && hash_terminal_binding_secret(&binding_secret)
+                    == entry.terminal_binding_secret_hash;
             if !accepted {
                 tracing::info!(
                     slug = %entry.slug,
-                    empty_token = token.is_empty(),
-                    "rejecting terminal tunnel: relay tunnel auth rejected"
+                    "rejecting terminal tunnel: relay terminal binding rejected"
                 );
                 let _ = send_error(
                     &mut socket,
-                    TunnelErrorCode::AuthRejected,
-                    "relay tunnel auth rejected",
+                    TunnelErrorCode::TerminalBindingRejected,
+                    "relay terminal binding rejected",
                 )
                 .await;
                 return;

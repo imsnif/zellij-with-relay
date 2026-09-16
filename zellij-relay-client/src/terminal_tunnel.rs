@@ -13,7 +13,7 @@ pub async fn open_terminal_tunnel(
     relay_url: &str,
     slug: &str,
     tunnel_id: String,
-    relay_tunnel_auth_token: String,
+    terminal_binding_secret: String,
 ) -> Result<TerminalTunnelSession> {
     let url = format!(
         "{}/tunnel/terminal?slug={}",
@@ -28,7 +28,7 @@ pub async fn open_terminal_tunnel(
 
     let ready = TerminalMessage::Ready {
         tunnel_id: tunnel_id.clone(),
-        token: relay_tunnel_auth_token,
+        binding_secret: terminal_binding_secret,
     };
     sink.send(Message::Binary(ready.encode().into()))
         .await

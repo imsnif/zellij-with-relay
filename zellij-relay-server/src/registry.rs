@@ -5,8 +5,31 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use axum::extract::ws::Message as WsMessage;
+use rand::RngCore;
+use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot, Notify};
 use uuid::Uuid;
+
+/// A fresh, random 32-byte terminal binding secret, lowercase hex-encoded
+/// (64 chars) — the shape both the client and `tunnel_terminal.rs` validate.
+/// Scope: per tunnel lifetime, single-tunnel (see decision #1); dies with
+/// the registry entry. Deliberately not the `RelayTunnelAuthTokenHash`
+/// namespace — the terminal path must not import the token module.
+pub fn generate_terminal_binding_secret() -> String {
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+pub fn hash_terminal_binding_secret(secret: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(secret.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{:02x}", byte))
+        .collect()
+}
 
 /// The sharer's reply to a `PakeChallenge` round-trip.
 #[derive(Debug, Clone)]
@@ -84,6 +107,15 @@ pub struct TunnelEntry {
     pub sessions: Mutex<HashMap<Uuid, ViewerSession>>,
     /// Maps `client_id` → its single viewer's `Uuid` (1:1; no fan-out).
     pub client_id_to_viewer: Mutex<HashMap<u32, Uuid>>,
+    /// Set from `TunnelAuthBackend::authorize`'s `AuthDecision` on hosted
+    /// (`Online`) tunnels; `None` under standalone `LocalSqlite` auth, which
+    /// has no account to attribute events to.
+    pub user_id: Option<String>,
+    pub credential_id: Option<String>,
+    /// SHA-256 hex of the relay-generated terminal binding secret handed to
+    /// the client in `TunnelEstablished`. The account credential is never
+    /// stored here or re-checked for the terminal socket (see decision #1).
+    pub terminal_binding_secret_hash: String,
 }
 
 impl TunnelEntry {
@@ -166,6 +198,9 @@ mod tests {
             viewers: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             client_id_to_viewer: Mutex::new(HashMap::new()),
+            user_id: None,
+            credential_id: None,
+            terminal_binding_secret_hash: String::new(),
         })
     }
 
@@ -198,6 +233,22 @@ mod tests {
         let fetched = registry.get("dup").expect("entry present");
         assert_eq!(fetched.tunnel_id, second_id);
         assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn generated_binding_secret_is_64_lowercase_hex() {
+        let secret = generate_terminal_binding_secret();
+        assert_eq!(secret.len(), 64);
+        assert!(secret.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+    }
+
+    #[test]
+    fn binding_secret_hash_is_deterministic_and_distinguishes_input() {
+        let a = hash_terminal_binding_secret("abc");
+        let b = hash_terminal_binding_secret("abc");
+        let c = hash_terminal_binding_secret("abd");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
     }
 
     #[test]

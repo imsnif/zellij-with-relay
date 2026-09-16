@@ -135,6 +135,7 @@ xflags::xflags! {
             optional --wasm-clip
             optional --app-origin out: PathBuf
             optional --app-host host: String
+            optional --relay-origin origin: String
 
             /// Extra arguments appended to the native `cargo build` invocation
             /// (e.g. `--no-default-features`, `--features ...`, `--offline`, `--locked`, `-j N`).
@@ -282,6 +283,7 @@ pub struct Build {
     pub wasm_clip: bool,
     pub app_origin: Option<PathBuf>,
     pub app_host: Option<String>,
+    pub relay_origin: Option<String>,
 }
 
 #[derive(Debug)]

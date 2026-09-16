@@ -114,22 +114,73 @@ function isIpLiteralHost(host) {
     return /^\d+(\.\d+){3}$/.test(host) || host.startsWith("[");
 }
 
+/**
+ * Return the relay HTTP origin pinned into a staged app-origin artifact.
+ * This value comes from build-generated HTML, never from share-link data.
+ */
+export function getConfiguredRelayOrigin() {
+    const element = document.querySelector('meta[name="zellij-relay-origin"]');
+    if (!element) return null;
+
+    const configured = element.getAttribute("content");
+    try {
+        const parsed = new URL(configured);
+        if (
+            !["https:", "http:"].includes(parsed.protocol) ||
+            parsed.username ||
+            parsed.password ||
+            parsed.pathname !== "/" ||
+            parsed.search ||
+            parsed.hash
+        ) {
+            throw new Error("invalid relay origin");
+        }
+        const hostname = parsed.hostname.toLowerCase();
+        const isLoopback =
+            hostname === "localhost" ||
+            hostname === "[::1]" ||
+            /^127(?:\.\d{1,3}){3}$/.test(hostname);
+        if (parsed.protocol === "http:" && !isLoopback) {
+            throw new Error("insecure remote relay origin");
+        }
+        return parsed.origin;
+    } catch (_) {
+        throw new Error("The app artifact contains an invalid relay origin");
+    }
+}
+
 export function getRelayTarget() {
     const params = getFragmentParams();
     const slug = getRelaySlug();
-    let relayHost = deriveRelayHost(location.hostname);
-    if (location.port) {
-        relayHost += ":" + location.port;
+    const configuredOrigin = getConfiguredRelayOrigin();
+    let relayHost;
+    let httpOrigin;
+    let websocketOrigin;
+    if (configuredOrigin) {
+        const relayUrl = new URL(configuredOrigin);
+        relayHost = relayUrl.host;
+        httpOrigin = relayUrl.origin;
+        websocketOrigin = relayUrl.origin.replace(
+            /^https?/,
+            relayUrl.protocol === "https:" ? "wss" : "ws"
+        );
+    } else {
+        relayHost = deriveRelayHost(location.hostname);
+        if (location.port) {
+            relayHost += ":" + location.port;
+        }
+        const httpScheme = is_https() ? "https" : "http";
+        const wsScheme = is_https() ? "wss" : "ws";
+        httpOrigin = `${httpScheme}://${relayHost}`;
+        websocketOrigin = `${wsScheme}://${relayHost}`;
     }
-    const httpScheme = is_https() ? "https" : "http";
-    const wsScheme = is_https() ? "wss" : "ws";
     return {
         slug,
         secret: params.k || null,
         linkId: params.l ? hexToBytes(params.l) : null,
         relayHost,
-        httpBase: `${httpScheme}://${relayHost}/r/${slug}`,
-        wsBase: `${wsScheme}://${relayHost}/r/${slug}`,
+        httpBase: `${httpOrigin}/r/${slug}`,
+        wsBase: `${websocketOrigin}/r/${slug}`,
     };
 }
 
