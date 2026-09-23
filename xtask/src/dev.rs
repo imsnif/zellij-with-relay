@@ -158,6 +158,7 @@ pub fn relay_sharer_dev(sh: &Shell, flags: crate::flags::RelaySharerDev) -> anyh
             wasm_clip: false,
             app_origin: None,
             app_host: None,
+            relay_origin: None,
         },
     )
     .context("failed to build the plugins for the sharer")?;
