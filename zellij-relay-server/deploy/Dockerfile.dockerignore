@@ -16,6 +16,28 @@ target/
 *.swo
 .DS_Store
 
+# Local configuration and secrets. The build context is uploaded to the
+# remote Docker daemon, so exclude these even though the relay build does not
+# reference them directly.
+.env
+.env.*
+**/.env
+**/.env.*
+.dev.vars
+**/.dev.vars
+.secrets/
+**/.secrets/
+*.pem
+**/*.pem
+*.key
+**/*.key
+*.p12
+**/*.p12
+*.pfx
+**/*.pfx
+**/id_rsa
+**/id_ed25519
+
 # Pre-built WASM plugin artefacts (rebuilt by cargo if needed; relay doesn't use them)
 assets/plugins/
 **/*.wasm

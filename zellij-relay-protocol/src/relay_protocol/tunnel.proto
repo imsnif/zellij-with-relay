@@ -4,7 +4,9 @@ package zellij.relay.v1;
 // Tunnel handshake: sent by the Zellij instance as the first message on the
 // control WebSocket.
 message TunnelAuth {
-  string token = 1;            // relay tunnel auth token (sharer → relay)
+  oneof credential {
+    string token = 1;            // stage 2 bearer; stage 3 adds a variant here
+  }
   string session_name = 2;
   uint32 protocol_version = 3;
   string zellij_version = 4;
@@ -26,6 +28,10 @@ message TunnelEstablished {
   string public_url = 1;
   string slug = 2;
   string tunnel_id = 3;
+  // Relay-generated, per-tunnel secret the client must present on the
+  // terminal socket. Valid for this tunnel's lifetime only; replaces
+  // re-presenting the account credential on /tunnel/terminal.
+  string terminal_binding_secret = 4;
 }
 
 // Classification of a TunnelError so receivers branch on a typed code rather
@@ -39,6 +45,10 @@ enum TunnelErrorCode {
   MISSING_SLUG = 5;
   UNKNOWN_SLUG = 6;
   TUNNEL_ID_MISMATCH = 7;
+  // Terminal socket presented a bad/absent terminal binding secret. Distinct
+  // from AUTH_REJECTED: it signals a linking bug/attack, not bad account
+  // credentials, and must NOT trigger the sharer plugin's auth-rejected UX.
+  TERMINAL_BINDING_REJECTED = 8;
 }
 
 // Error surface on either the control or the terminal tunnel. `message` is a
@@ -57,7 +67,7 @@ message TunnelError {
 // terminal WebSocket is opened for a previously-established tunnel.
 message TunnelReady {
   string tunnel_id = 1;
-  string token = 2;
+  string binding_secret = 2;     // was: string token = 2 (account credential)
 }
 
 // Relay → Zellij: a viewer has begun a SPAKE2 password-authenticated key

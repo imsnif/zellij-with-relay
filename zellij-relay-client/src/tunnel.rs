@@ -76,7 +76,7 @@ pub async fn start_relay_tunnel(
         &relay_url,
         &slug,
         tunnel_id.clone(),
-        relay_tunnel_auth_token.clone(),
+        control.terminal_binding_secret.clone(),
     )
     .await?;
 
@@ -300,7 +300,7 @@ async fn run_supervisor(
             &args.relay_url,
             &new_slug,
             new_tunnel_id.clone(),
-            args.relay_tunnel_auth_token.clone(),
+            control.terminal_binding_secret.clone(),
         )
         .await
         {

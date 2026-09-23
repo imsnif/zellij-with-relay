@@ -1,0 +1,19 @@
+# Hosted-control-plane overlay for the zellij.online relay deployment.
+#
+# Standalone self-hosting continues to use compose.yml by itself. deploy.sh
+# adds this file only for an explicit `deploy --mode hosted` invocation.
+
+services:
+  relay:
+    environment:
+      RELAY_CONTROL_PLANE_URL: "${RELAY_CONTROL_PLANE_URL:?set by deploy.sh in hosted mode}"
+      RELAY_CONTROL_PLANE_SECRET_FILE: "/run/secrets/relay-control-plane"
+    labels:
+      org.zellij.relay.mode: "hosted"
+    volumes:
+      - relay-control-plane-secret:/run/secrets:ro
+
+volumes:
+  relay-control-plane-secret:
+    external: true
+    name: "${RELAY_CONTROL_PLANE_SECRET_VOLUME:?set by deploy.sh in hosted mode}"

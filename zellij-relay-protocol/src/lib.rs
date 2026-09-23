@@ -23,7 +23,17 @@ pub use conversion::{
 
 use std::ops::RangeInclusive;
 
-/// Current relay tunnel protocol version. Bumped on breaking changes.
+/// Current relay tunnel protocol version.
+///
+/// v1 is an unpublished pre-release draft: nothing built against it is
+/// deployed, so it is revised in place (wire-compatible tweaks like the
+/// `TunnelAuth` credential `oneof`, additive fields like
+/// `TunnelEstablished.terminal_binding_secret`, and even semantically
+/// incompatible renames like `TunnelReady.token` -> `binding_secret`) without
+/// a version bump. Once something depends on this crate in production, this
+/// stops being true and breaking changes must bump `PROTOCOL_VERSION`
+/// instead. Mixed old/new development binaries are unsupported — rebuild
+/// the protocol/client/server crates together.
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Inclusive range of protocol versions a relay built against this crate

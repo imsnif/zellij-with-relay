@@ -50,7 +50,7 @@ fn prepare(sh: &Shell, https_port: Option<u16>, host: Option<String>) -> anyhow:
     let stage_wasm_to_assets = false;
     crate::build::build_wasm_clip(sh, build_release_wasm, stage_wasm_to_assets)
         .context("failed to build the zellij-ansi-clip wasm blob")?;
-    crate::build::stage_app_origin_dev(sh, &app_dir, &authority)
+    crate::build::stage_app_origin_dev(sh, &app_dir, &authority, None)
         .context("failed to stage the app-origin static site")?;
 
     if data_dir.exists() {
@@ -68,7 +68,7 @@ fn prepare(sh: &Shell, https_port: Option<u16>, host: Option<String>) -> anyhow:
 
     let app_origin = format!("https://{}", authority);
     let public_url_template = format!("https://{}/r/{{slug}}", authority);
-    let ca_cert_path = dirs_local_share().join("caddy/pki/authorities/local/root.crt");
+    let ca_cert_path = caddy_data_home().join("caddy/pki/authorities/local/root.crt");
 
     clear_stale_leaf_certs(&host, &relay_authority);
 
@@ -288,7 +288,7 @@ fn clear_stale_leaf_certs(host: &str, relay_authority: &str) {
         .rsplit_once(':')
         .map(|(h, _)| h)
         .unwrap_or(relay_authority);
-    let base = dirs_local_share().join("caddy/certificates/local");
+    let base = caddy_data_home().join("caddy/certificates/local");
     let mut names = vec![host];
     if relay_host != host {
         names.push(relay_host);
@@ -577,13 +577,25 @@ fn sha256_hex(bytes: &[u8]) -> String {
     out
 }
 
-fn dirs_local_share() -> std::path::PathBuf {
+/// The data-home base directory caddy stores its state under, mirroring
+/// caddy's own `AppDataDir()` precedence so we find its auto-generated local
+/// CA. Caddy checks `XDG_DATA_HOME` first on every platform, then falls back
+/// to the OS default — which on macOS is `~/Library/Application Support`, NOT
+/// `~/.local/share`. Getting this wrong makes `ensure_ca_trusted` silently
+/// no-op on macOS (CA "not found"), so the CA never lands in the system trust
+/// store. The caller appends `caddy/pki/authorities/local/root.crt`.
+fn caddy_data_home() -> std::path::PathBuf {
     if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
         if !xdg.is_empty() {
             return std::path::PathBuf::from(xdg);
         }
     }
     let home = std::env::var("HOME").unwrap_or_default();
+    if cfg!(target_os = "macos") {
+        return std::path::PathBuf::from(home)
+            .join("Library")
+            .join("Application Support");
+    }
     std::path::PathBuf::from(home).join(".local").join("share")
 }
 

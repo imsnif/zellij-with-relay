@@ -11,7 +11,9 @@ use axum::{
 };
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
+use crate::events::EventSink;
 use crate::registry::Registry;
+use crate::tunnel_auth::TunnelAuthBackend;
 use crate::viewer::HANDSHAKE_HEADER;
 
 /// Honest-relay defense-in-depth: cap login (PAKE-start) attempts per client
@@ -26,17 +28,30 @@ pub struct AppState {
     pub registry: Registry,
     pub public_url_template: String,
     pub allowed_origins: Arc<Vec<String>>,
+    pub tunnel_auth: Arc<TunnelAuthBackend>,
+    pub event_sink: EventSink,
     login_attempts: Arc<Mutex<HashMap<String, (Instant, u32)>>>,
 }
 
 impl AppState {
+    /// Defaults to standalone auth (`LocalSqlite` + `Noop` events) — existing
+    /// tests and standalone deployments are unaffected. Hosted mode opts in
+    /// via `with_backends`.
     pub fn new(public_url_template: String, allowed_origins: Vec<String>) -> Self {
         Self {
             registry: Registry::new(),
             public_url_template,
             allowed_origins: Arc::new(allowed_origins),
+            tunnel_auth: Arc::new(TunnelAuthBackend::LocalSqlite),
+            event_sink: EventSink::Noop,
             login_attempts: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub fn with_backends(mut self, tunnel_auth: TunnelAuthBackend, event_sink: EventSink) -> Self {
+        self.tunnel_auth = Arc::new(tunnel_auth);
+        self.event_sink = event_sink;
+        self
     }
 
     pub fn origin_allowed(&self, origin: &str) -> bool {

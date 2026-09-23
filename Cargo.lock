@@ -4459,11 +4459,11 @@ dependencies = [
  "futures-util",
  "log",
  "rustls",
- "rustls-native-certs",
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
  "tungstenite",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -5687,6 +5687,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "toml 1.1.4+spec-1.1.0",
+ "url",
  "which",
  "xflags",
  "xshell",
@@ -5933,11 +5934,13 @@ dependencies = [
  "serde_json",
  "serial_test",
  "sha2 0.11.0",
+ "tempfile",
  "tokio",
  "tokio-tungstenite",
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
  "zellij-relay-protocol",
 ]

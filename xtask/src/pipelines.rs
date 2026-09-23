@@ -35,6 +35,7 @@ pub fn make(sh: &Shell, flags: flags::Make) -> anyhow::Result<()> {
                     wasm_clip: false,
                     app_origin: None,
                     app_host: None,
+                    relay_origin: None,
                 },
             )
         })
@@ -72,6 +73,7 @@ pub fn install(sh: &Shell, flags: flags::Install) -> anyhow::Result<()> {
             wasm_clip: false,
             app_origin: None,
             app_host: None,
+            relay_origin: None,
         },
     )
     .and_then(|_| {
@@ -87,6 +89,7 @@ pub fn install(sh: &Shell, flags: flags::Install) -> anyhow::Result<()> {
                 wasm_clip: false,
                 app_origin: None,
                 app_host: None,
+                relay_origin: None,
             },
         )
     })
@@ -162,6 +165,7 @@ pub fn run(sh: &Shell, mut flags: flags::Run) -> anyhow::Result<()> {
                 wasm_clip: false,
                 app_origin: None,
                 app_host: None,
+                relay_origin: None,
             },
         )
         .and_then(|_| crate::cargo())
@@ -310,6 +314,7 @@ pub fn publish(sh: &Shell, flags: flags::Publish) -> anyhow::Result<()> {
                 wasm_clip: false,
                 app_origin: None,
                 app_host: None,
+                relay_origin: None,
             },
         )
         .context(err_context)?;
@@ -327,13 +332,19 @@ pub fn publish(sh: &Shell, flags: flags::Publish) -> anyhow::Result<()> {
                 wasm_clip: true,
                 app_origin: None,
                 app_host: None,
+                relay_origin: None,
                 args: vec![],
             },
         )
         .context(err_context)?;
 
-        build::stage_app_origin(sh, &project_dir.join("target").join("app-origin"), None)
-            .context(err_context)?;
+        build::stage_app_origin(
+            sh,
+            &project_dir.join("target").join("app-origin"),
+            None,
+            None,
+        )
+        .context(err_context)?;
 
         // Update default config
         sh.copy_file(

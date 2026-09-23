@@ -69,7 +69,7 @@ async fn read_next_binary(stream: &mut WsStream) -> Option<Vec<u8>> {
 async fn perform_control_handshake(
     ws_base: &str,
     read_only: bool,
-) -> (WsStream, String, String, String) {
+) -> (WsStream, String, String, String, String) {
     let url = format!("{}/tunnel/control", ws_base);
     let (mut ws_stream, _) = connect_async(&url).await.expect("connect control");
     let auth = ControlMessage::Auth {
@@ -89,7 +89,8 @@ async fn perform_control_handshake(
             public_url,
             slug,
             tunnel_id,
-        } => (ws_stream, public_url, slug, tunnel_id),
+            terminal_binding_secret,
+        } => (ws_stream, public_url, slug, tunnel_id, terminal_binding_secret),
         other => panic!("expected Established, got {:?}", other),
     }
 }
@@ -224,10 +225,15 @@ async fn viewer_handshake(
 #[tokio::test]
 async fn control_handshake_happy_path() {
     let (_http, ws, registry) = spawn_router().await;
-    let (_control_ws, public_url, slug, tunnel_id) = perform_control_handshake(&ws, false).await;
+    let (_control_ws, public_url, slug, tunnel_id, terminal_binding_secret) =
+        perform_control_handshake(&ws, false).await;
 
     assert_eq!(public_url, URL_TEMPLATE.replace("{slug}", &slug));
     assert_eq!(slug.len(), 8);
+    assert_eq!(terminal_binding_secret.len(), 64);
+    assert!(terminal_binding_secret
+        .bytes()
+        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
 
     let entry = registry.get(&slug).expect("registry entry");
     assert_eq!(entry.tunnel_id.to_string(), tunnel_id);
@@ -238,7 +244,8 @@ async fn control_handshake_happy_path() {
 #[tokio::test]
 async fn control_handshake_read_only_flag() {
     let (_http, ws, registry) = spawn_router().await;
-    let (_control_ws, _public_url, slug, _tunnel_id) = perform_control_handshake(&ws, true).await;
+    let (_control_ws, _public_url, slug, _tunnel_id, _secret) =
+        perform_control_handshake(&ws, true).await;
     let entry = registry.get(&slug).expect("registry entry");
     assert!(entry.read_only);
 }
@@ -246,13 +253,14 @@ async fn control_handshake_read_only_flag() {
 #[tokio::test]
 async fn terminal_channel_links_tunnel() {
     let (_http, ws, _registry) = spawn_router().await;
-    let (_control_ws, _public_url, slug, tunnel_id) = perform_control_handshake(&ws, false).await;
+    let (_control_ws, _public_url, slug, tunnel_id, terminal_binding_secret) =
+        perform_control_handshake(&ws, false).await;
 
     let url = format!("{}/tunnel/terminal?slug={}", ws, slug);
     let (mut ws_stream, _) = connect_async(&url).await.expect("connect terminal");
     let ready = TerminalMessage::Ready {
         tunnel_id: tunnel_id.clone(),
-        token: shared_test_token().to_string(),
+        binding_secret: terminal_binding_secret,
     };
     ws_stream.send(Message::Binary(ready.encode().into())).await.unwrap();
     // The relay does not reply to a matching Ready; absence of an Error frame
@@ -267,15 +275,18 @@ async fn terminal_channel_links_tunnel() {
 }
 
 #[tokio::test]
-async fn terminal_channel_rejects_bad_token() {
+async fn terminal_channel_rejects_bad_binding_secret() {
     let (_http, ws, _registry) = spawn_router().await;
-    let (_control_ws, _public_url, slug, tunnel_id) = perform_control_handshake(&ws, false).await;
+    let (_control_ws, _public_url, slug, tunnel_id, _secret) =
+        perform_control_handshake(&ws, false).await;
 
     let url = format!("{}/tunnel/terminal?slug={}", ws, slug);
     let (mut ws_stream, _) = connect_async(&url).await.expect("connect terminal");
     let ready = TerminalMessage::Ready {
         tunnel_id: tunnel_id.clone(),
-        token: "not-a-real-token".into(),
+        // Well-formed shape but wrong value — must be rejected with the
+        // terminal-binding code, NOT the account auth-rejected code.
+        binding_secret: "0".repeat(64),
     };
     ws_stream.send(Message::Binary(ready.encode().into())).await.unwrap();
     let bytes = read_next_binary(&mut ws_stream)
@@ -283,7 +294,7 @@ async fn terminal_channel_rejects_bad_token() {
         .expect("expected rejection frame");
     match decode_terminal_frame(&bytes).expect("decode terminal frame") {
         TerminalMessage::Error { code, .. } => {
-            assert_eq!(code, TunnelErrorCode::AuthRejected);
+            assert_eq!(code, TunnelErrorCode::TerminalBindingRejected);
         },
         other => panic!("expected Error frame, got {:?}", other),
     }
@@ -292,7 +303,8 @@ async fn terminal_channel_rejects_bad_token() {
 #[tokio::test]
 async fn pake_viewer_round_trip_succeeds() {
     let (http, ws, registry) = spawn_router().await;
-    let (control_ws, _public_url, slug, _tunnel_id) = perform_control_handshake(&ws, false).await;
+    let (control_ws, _public_url, slug, _tunnel_id, _secret) =
+        perform_control_handshake(&ws, false).await;
 
     let sharer = tokio::spawn(run_fake_sharer(control_ws, TEST_PIN.to_vec(), slug.clone()));
 
@@ -315,7 +327,8 @@ async fn pake_viewer_round_trip_succeeds() {
 #[tokio::test]
 async fn pake_viewer_wrong_pin_rejected() {
     let (http, ws, _registry) = spawn_router().await;
-    let (control_ws, _public_url, slug, _tunnel_id) = perform_control_handshake(&ws, false).await;
+    let (control_ws, _public_url, slug, _tunnel_id, _secret) =
+        perform_control_handshake(&ws, false).await;
 
     // Sharer published TEST_PIN; the viewer presents a different one.
     let sharer = tokio::spawn(run_fake_sharer(control_ws, TEST_PIN.to_vec(), slug.clone()));

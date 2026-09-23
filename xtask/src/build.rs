@@ -32,7 +32,21 @@ pub fn build(sh: &Shell, flags: flags::Build) -> anyhow::Result<()> {
     }
 
     if let Some(out_dir) = flags.app_origin.clone() {
-        return stage_app_origin(sh, &out_dir, flags.app_host.as_deref());
+        if flags.release {
+            return stage_app_origin(
+                sh,
+                &out_dir,
+                flags.app_host.as_deref(),
+                flags.relay_origin.as_deref(),
+            );
+        }
+        build_wasm_clip(sh, true, /* stage_to_assets */ false)?;
+        return stage_app_origin_dev(
+            sh,
+            &out_dir,
+            flags.app_host.as_deref().unwrap_or(DEFAULT_APP_HOST),
+            flags.relay_origin.as_deref(),
+        );
     }
 
     // zellij-utils requires protobuf definition files to be present. Usually these are
@@ -515,6 +529,141 @@ pub fn build_wasm_relay_crypto(sh: &Shell, release: bool) -> anyhow::Result<()> 
 
 const DEFAULT_APP_HOST: &str = "zellij.online";
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RelayOriginConfig {
+    authority: String,
+    http_origin: String,
+    websocket_origin: String,
+}
+
+impl RelayOriginConfig {
+    fn derived(app_host: &str) -> anyhow::Result<Self> {
+        Self::parse(&format!("https://{}", derive_relay_authority(app_host))).with_context(|| {
+            format!("invalid relay authority derived from --app-host '{app_host}'")
+        })
+    }
+
+    fn parse(input: &str) -> anyhow::Result<Self> {
+        use anyhow::bail;
+        use url::Host;
+
+        if input.is_empty() || input.chars().any(char::is_whitespace) || input.contains('\\') {
+            bail!("--relay-origin must be one unambiguous HTTP(S) or WebSocket origin");
+        }
+
+        let scheme_end = input
+            .find("://")
+            .ok_or_else(|| anyhow::anyhow!("--relay-origin must include a scheme"))?;
+        let after_scheme = &input[scheme_end + 3..];
+        let authority_end = after_scheme
+            .find(['/', '?', '#'])
+            .unwrap_or(after_scheme.len());
+        let raw_authority = &after_scheme[..authority_end];
+        let raw_path = after_scheme[authority_end..]
+            .split(['?', '#'])
+            .next()
+            .unwrap_or_default();
+        if raw_authority.is_empty() || raw_authority.ends_with(':') || raw_authority.contains('%') {
+            bail!("--relay-origin contains an invalid or ambiguous host/port");
+        }
+        if !raw_path.chars().all(|c| c == '/') {
+            bail!("--relay-origin must not contain a path");
+        }
+
+        let parsed = url::Url::parse(input).context("failed to parse --relay-origin")?;
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            bail!("--relay-origin must not contain credentials");
+        }
+        if !parsed.path().chars().all(|c| c == '/') {
+            bail!("--relay-origin must not contain a path");
+        }
+        if parsed.query().is_some() {
+            bail!("--relay-origin must not contain a query string");
+        }
+        if parsed.fragment().is_some() {
+            bail!("--relay-origin must not contain a fragment");
+        }
+        if parsed.port() == Some(0) {
+            bail!("--relay-origin port must be between 1 and 65535");
+        }
+
+        let host = parsed
+            .host()
+            .ok_or_else(|| anyhow::anyhow!("--relay-origin must contain a host"))?;
+        let is_loopback = match host {
+            Host::Domain(domain) => {
+                validate_domain_name(domain)?;
+                domain == "localhost"
+            },
+            Host::Ipv4(address) => address.is_loopback(),
+            Host::Ipv6(address) => address.is_loopback(),
+        };
+        let secure = match parsed.scheme() {
+            "https" | "wss" => true,
+            "http" | "ws" if is_loopback => false,
+            "http" | "ws" => {
+                bail!("remote --relay-origin values must use https:// or wss://")
+            },
+            _ => bail!("--relay-origin must use https://, wss://, or a loopback HTTP/WS origin"),
+        };
+
+        let host = match host {
+            Host::Domain(domain) => domain.to_string(),
+            Host::Ipv4(address) => address.to_string(),
+            Host::Ipv6(address) => format!("[{address}]"),
+        };
+        let authority = match parsed.port() {
+            Some(port) => format!("{host}:{port}"),
+            None => host,
+        };
+        let (http_scheme, websocket_scheme) = if secure {
+            ("https", "wss")
+        } else {
+            ("http", "ws")
+        };
+
+        Ok(Self {
+            http_origin: format!("{http_scheme}://{authority}"),
+            websocket_origin: format!("{websocket_scheme}://{authority}"),
+            authority,
+        })
+    }
+
+    fn csp(&self) -> String {
+        format!(
+            "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' {} {}; manifest-src 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'",
+            self.http_origin, self.websocket_origin
+        )
+    }
+}
+
+fn validate_domain_name(domain: &str) -> anyhow::Result<()> {
+    use anyhow::bail;
+
+    if domain.len() > 253 || domain.ends_with('.') {
+        bail!("--relay-origin contains an invalid domain name");
+    }
+    for label in domain.split('.') {
+        if label.is_empty()
+            || label.len() > 63
+            || !label
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+            || !label
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphanumeric)
+            || !label
+                .as_bytes()
+                .last()
+                .is_some_and(u8::is_ascii_alphanumeric)
+        {
+            bail!("--relay-origin contains an invalid domain name");
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn derive_relay_authority(app_host: &str) -> String {
     let (host, port) = match app_host.rsplit_once(':') {
         Some((h, p)) if !h.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => (h, Some(p)),
@@ -532,25 +681,30 @@ pub(crate) fn derive_relay_authority(app_host: &str) -> String {
     }
 }
 
-fn app_origin_csp(app_host: &str) -> String {
-    let relay = derive_relay_authority(app_host);
-    format!(
-        "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' https://{relay} wss://{relay}; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
-    )
-}
-
 use zellij_web_client_assets::manifest;
 
 pub fn stage_app_origin(
     sh: &Shell,
     out_dir: &Path,
     app_host: Option<&str>,
+    relay_origin: Option<&str>,
 ) -> anyhow::Result<()> {
-    stage_app_origin_inner(sh, out_dir, false, app_host.unwrap_or(DEFAULT_APP_HOST))
+    stage_app_origin_inner(
+        sh,
+        out_dir,
+        false,
+        app_host.unwrap_or(DEFAULT_APP_HOST),
+        relay_origin,
+    )
 }
 
-pub fn stage_app_origin_dev(sh: &Shell, out_dir: &Path, app_authority: &str) -> anyhow::Result<()> {
-    stage_app_origin_inner(sh, out_dir, true, app_authority)
+pub fn stage_app_origin_dev(
+    sh: &Shell,
+    out_dir: &Path,
+    app_authority: &str,
+    relay_origin: Option<&str>,
+) -> anyhow::Result<()> {
+    stage_app_origin_inner(sh, out_dir, true, app_authority, relay_origin)
 }
 
 fn stage_app_origin_inner(
@@ -558,7 +712,12 @@ fn stage_app_origin_inner(
     out_dir: &Path,
     dev_clip_from_target: bool,
     app_host: &str,
+    relay_origin: Option<&str>,
 ) -> anyhow::Result<()> {
+    let relay = match relay_origin {
+        Some(origin) => RelayOriginConfig::parse(origin)?,
+        None => RelayOriginConfig::derived(app_host)?,
+    };
     crate::assets::assets(sh, crate::flags::Assets { check: false })?;
 
     let root = crate::project_root();
@@ -582,11 +741,11 @@ fn stage_app_origin_inner(
 
     let index_src = std::fs::read_to_string(src.join("index.html"))
         .with_context(|| "failed to read source index.html")?;
-    let csp = app_origin_csp(app_host);
-    let index_out = render_app_origin_index(&index_src, &core_assets, &csp)?;
-    verify_app_origin_index(&index_out)?;
+    let index_out = render_app_origin_index(&index_src, &core_assets, &relay)?;
+    verify_app_origin_index(&index_out, &relay)?;
     std::fs::write(out_dir.join("index.html"), index_out)
         .with_context(|| "failed to write staged index.html")?;
+    write_static_host_config(out_dir, &relay.csp())?;
 
     let version = zellij_web_client_assets::VERSION;
     let bundle_dir = out_dir.join("v").join(version);
@@ -597,11 +756,15 @@ fn stage_app_origin_inner(
     if dev_clip_from_target {
         let target_clip = root
             .join("target/wasm32-unknown-unknown/release/zellij_ansi_clip.wasm");
-        if target_clip.is_file() {
-            sh.copy_file(&target_clip, &bundle_assets.join("clip.wasm"))?;
+        if !target_clip.is_file() {
+            return Err(anyhow::anyhow!(
+                "expected development clip.wasm at '{}'",
+                target_clip.display()
+            ));
         }
+        sh.copy_file(&target_clip, &bundle_assets.join("clip.wasm"))?;
     }
-    write_wasm_integrity_module(&bundle_assets, &["clip.wasm"], !dev_clip_from_target)?;
+    write_wasm_integrity_module(&bundle_assets, &["clip.wasm"], true)?;
 
     let (manifest_json, rolled_up) = build_app_manifest(&bundle_assets)?;
     std::fs::write(bundle_dir.join("app-manifest.json"), manifest_json)
@@ -627,10 +790,13 @@ fn stage_app_origin_inner(
 
     println!(">> app-origin static site staged to {}", out_dir.display());
     println!(
-        ">> connect-src pinned to relay host {} (override with --app-host)",
-        derive_relay_authority(app_host)
+        ">> browser runtime and connect-src pinned to {} ({})",
+        relay.http_origin, relay.websocket_origin
     );
-    println!(">> versioned application bundle staged at v/{}/ ({})", version, rolled_up);
+    println!(
+        ">> versioned application bundle staged at v/{}/ ({})",
+        version, rolled_up
+    );
     Ok(())
 }
 
@@ -685,7 +851,7 @@ fn build_app_manifest(bundle_assets: &Path) -> anyhow::Result<(String, String)> 
 fn render_app_origin_index(
     index_src: &str,
     assets_out: &Path,
-    csp: &str,
+    relay: &RelayOriginConfig,
 ) -> anyhow::Result<String> {
     let resolved = index_src
         .replace("BASE_URL", "/")
@@ -703,7 +869,11 @@ fn render_app_origin_index(
             out_lines.push(line.to_string());
             out_lines.push(format!(
                 "        <meta http-equiv=\"Content-Security-Policy\" content=\"{}\" />",
-                csp
+                relay.csp()
+            ));
+            out_lines.push(format!(
+                "        <meta name=\"zellij-relay-origin\" content=\"{}\" />",
+                relay.http_origin
             ));
             csp_injected = true;
             continue;
@@ -758,25 +928,36 @@ fn assert_name_set_matches(
     Ok(())
 }
 
-fn verify_app_origin_index(index_html: &str) -> anyhow::Result<()> {
+fn verify_app_origin_index(index_html: &str, relay: &RelayOriginConfig) -> anyhow::Result<()> {
     let mut classic_scripts: Vec<String> = Vec::new();
     let mut module_scripts: Vec<String> = Vec::new();
     let mut stylesheets: Vec<String> = Vec::new();
-    let mut csp_pinned = false;
+    let expected_csp = format!(
+        "<meta http-equiv=\"Content-Security-Policy\" content=\"{}\" />",
+        relay.csp()
+    );
+    let expected_runtime = format!(
+        "<meta name=\"zellij-relay-origin\" content=\"{}\" />",
+        relay.http_origin
+    );
+    if index_html.matches("<base href=\"/\" />").count() != 1 {
+        return Err(anyhow::anyhow!(
+            "staged index.html must contain exactly one same-origin root base URL"
+        ));
+    }
+    if index_html.matches(&expected_csp).count() != 1
+        || index_html.matches(&expected_runtime).count() != 1
+    {
+        return Err(anyhow::anyhow!(
+            "staged index.html runtime relay target and CSP do not match the validated relay origin"
+        ));
+    }
     for line in index_html.lines() {
         if line.contains("<style") {
             return Err(anyhow::anyhow!(
                 "staged index.html must not contain a <style> element: {}",
                 line.trim()
             ));
-        }
-        if line.contains("<meta http-equiv=\"Content-Security-Policy\"") {
-            if !line.contains("connect-src 'self' https://") {
-                return Err(anyhow::anyhow!(
-                    "staged index.html CSP does not pin connect-src to a named relay host"
-                ));
-            }
-            csp_pinned = true;
         }
         if line.contains("<script") {
             let name = staged_asset_name(line, "src=\"assets/").ok_or_else(|| {
@@ -802,11 +983,6 @@ fn verify_app_origin_index(index_html: &str) -> anyhow::Result<()> {
             stylesheets.push(name);
         }
     }
-    if !csp_pinned {
-        return Err(anyhow::anyhow!(
-            "staged index.html carries no pinned Content-Security-Policy meta"
-        ));
-    }
     assert_name_set_matches(
         "classic script",
         classic_scripts,
@@ -822,6 +998,17 @@ fn verify_app_origin_index(index_html: &str) -> anyhow::Result<()> {
         stylesheets,
         manifest::HANDSHAKE_STYLESHEET_NAMES,
     )?;
+    Ok(())
+}
+
+fn write_static_host_config(out_dir: &Path, csp: &str) -> anyhow::Result<()> {
+    std::fs::write(out_dir.join("_redirects"), "/r/*  /index.html  200\n")
+        .with_context(|| "failed to write _redirects")?;
+    let headers = format!(
+        "/*\n  Content-Security-Policy: {csp}\n  Strict-Transport-Security: max-age=63072000; includeSubDomains\n  X-Content-Type-Options: nosniff\n  X-Frame-Options: DENY\n  Referrer-Policy: no-referrer\n"
+    );
+    std::fs::write(out_dir.join("_headers"), headers)
+        .with_context(|| "failed to write _headers")?;
     Ok(())
 }
 
@@ -889,7 +1076,10 @@ fn write_release_hashes(out_dir: &Path) -> anyhow::Result<()> {
     for path in &files {
         let rel = path.strip_prefix(out_dir).expect("within out_dir");
         let rel = rel.to_string_lossy().replace(char::from(92), "/");
-        if rel == "RELEASE_HASHES.txt" {
+        if matches!(
+            rel.as_str(),
+            "RELEASE_HASHES.txt" | "_headers" | "_redirects"
+        ) {
             continue;
         }
         let bytes = std::fs::read(path)?;
@@ -1000,7 +1190,7 @@ mod app_origin_tests {
         let out = crate::project_root()
             .join("target")
             .join("app-origin-stage-test");
-        stage_app_origin(&sh, &out, None).unwrap();
+        stage_app_origin(&sh, &out, None, None).unwrap();
 
         let index = std::fs::read_to_string(out.join("index.html")).unwrap();
         assert!(index.contains("core-bootstrap.js"));
@@ -1030,16 +1220,24 @@ mod app_origin_tests {
 
         let hashes = std::fs::read_to_string(out.join("RELEASE_HASHES.txt")).unwrap();
         assert!(hashes.contains(&format!("v/{}/assets/app.js", version)));
+        assert!(!hashes.lines().any(|line| line.ends_with("  _headers")));
+        assert!(!hashes.lines().any(|line| line.ends_with("  _redirects")));
 
         let _ = std::fs::remove_dir_all(&out);
     }
 
     fn valid_index_fixture() -> String {
+        let relay = RelayOriginConfig::parse("https://relay.example.com").unwrap();
         let mut lines: Vec<String> = vec![
             "<html>".to_string(),
+            "<base href=\"/\" />".to_string(),
             format!(
                 "<meta http-equiv=\"Content-Security-Policy\" content=\"{}\" />",
-                app_origin_csp("example.com")
+                relay.csp()
+            ),
+            format!(
+                "<meta name=\"zellij-relay-origin\" content=\"{}\" />",
+                relay.http_origin
             ),
             "<link rel=\"stylesheet\" href=\"assets/style.css\" integrity=\"sha384-x\" crossorigin=\"anonymous\">".to_string(),
             "<script src=\"assets/modals.js\" integrity=\"sha384-x\" crossorigin=\"anonymous\"></script>".to_string(),
@@ -1054,9 +1252,14 @@ mod app_origin_tests {
         lines.join("\n")
     }
 
+    fn verify_test_index(index: &str) -> anyhow::Result<()> {
+        let relay = RelayOriginConfig::parse("https://relay.example.com").unwrap();
+        verify_app_origin_index(index, &relay)
+    }
+
     #[test]
     fn verify_accepts_the_valid_fixture() {
-        verify_app_origin_index(&valid_index_fixture()).unwrap();
+        verify_test_index(&valid_index_fixture()).unwrap();
     }
 
     #[test]
@@ -1065,7 +1268,7 @@ mod app_origin_tests {
             "</html>",
             "<script>alert(1)</script>\n</html>",
         );
-        assert!(verify_app_origin_index(&doctored).is_err());
+        assert!(verify_test_index(&doctored).is_err());
     }
 
     #[test]
@@ -1074,7 +1277,7 @@ mod app_origin_tests {
             "</html>",
             "<script type=\"module\" src=\"assets/evil.js\" integrity=\"sha384-x\" crossorigin=\"anonymous\"></script>\n</html>",
         );
-        assert!(verify_app_origin_index(&doctored).is_err());
+        assert!(verify_test_index(&doctored).is_err());
     }
 
     #[test]
@@ -1085,7 +1288,7 @@ mod app_origin_tests {
             .filter(|line| !line.contains("assets/auth.js"))
             .collect::<Vec<&str>>()
             .join("\n");
-        assert!(verify_app_origin_index(&doctored).is_err());
+        assert!(verify_test_index(&doctored).is_err());
     }
 
     #[test]
@@ -1094,7 +1297,7 @@ mod app_origin_tests {
             "</html>",
             "<style>body { display: none; }</style>\n</html>",
         );
-        assert!(verify_app_origin_index(&doctored).is_err());
+        assert!(verify_test_index(&doctored).is_err());
     }
 
     #[test]
@@ -1103,7 +1306,7 @@ mod app_origin_tests {
             "<script src=\"assets/modals.js\" integrity=\"sha384-x\" crossorigin=\"anonymous\"></script>",
             "<script src=\"assets/modals.js\"></script>",
         );
-        assert!(verify_app_origin_index(&doctored).is_err());
+        assert!(verify_test_index(&doctored).is_err());
     }
 
     #[test]
@@ -1112,7 +1315,7 @@ mod app_origin_tests {
             "connect-src 'self' https://relay.example.com wss://relay.example.com",
             "connect-src 'self' https: wss:",
         );
-        assert!(verify_app_origin_index(&doctored).is_err());
+        assert!(verify_test_index(&doctored).is_err());
     }
 
     #[test]
@@ -1136,7 +1339,7 @@ mod app_origin_tests {
         let out = crate::project_root()
             .join("target")
             .join("app-origin-stage-test-csp");
-        stage_app_origin(&sh, &out, Some("example.com")).unwrap();
+        stage_app_origin(&sh, &out, Some("example.com"), None).unwrap();
 
         let index = std::fs::read_to_string(out.join("index.html")).unwrap();
         assert!(index
@@ -1147,6 +1350,108 @@ mod app_origin_tests {
         assert!(index.contains("crossorigin=\"anonymous\""));
 
         let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn explicit_pages_relay_origin_drives_runtime_csp_and_host_files() {
+        let sh = Shell::new().unwrap();
+        let out = crate::project_root()
+            .join("target")
+            .join("app-origin-stage-test-explicit-relay");
+        stage_app_origin(
+            &sh,
+            &out,
+            Some("viewer-project.pages.dev"),
+            Some("https://relay.zellij.online/"),
+        )
+        .unwrap();
+
+        let index = std::fs::read_to_string(out.join("index.html")).unwrap();
+        let headers = std::fs::read_to_string(out.join("_headers")).unwrap();
+        let redirects = std::fs::read_to_string(out.join("_redirects")).unwrap();
+        let relay = RelayOriginConfig::parse("https://relay.zellij.online").unwrap();
+        let expected_connect =
+            "connect-src 'self' https://relay.zellij.online wss://relay.zellij.online";
+        let expected_headers = format!(
+            "/*\n  Content-Security-Policy: {}\n  Strict-Transport-Security: max-age=63072000; includeSubDomains\n  X-Content-Type-Options: nosniff\n  X-Frame-Options: DENY\n  Referrer-Policy: no-referrer\n",
+            relay.csp()
+        );
+        assert!(index.contains(
+            "<meta name=\"zellij-relay-origin\" content=\"https://relay.zellij.online\" />"
+        ));
+        assert!(index.contains(expected_connect));
+        assert!(index.contains("<base href=\"/\" />"));
+        assert!(index.contains("base-uri 'self'"));
+        assert_eq!(headers, expected_headers);
+        assert_eq!(redirects, "/r/*  /index.html  200\n");
+        assert!(!index.contains("relay.viewer-project.pages.dev"));
+
+        let hashes = std::fs::read_to_string(out.join("RELEASE_HASHES.txt")).unwrap();
+        assert!(hashes.contains("index.html"));
+        assert!(hashes.contains(&format!(
+            "v/{}/assets/app.js",
+            zellij_web_client_assets::VERSION
+        )));
+        assert!(!hashes.lines().any(|line| line.ends_with("  _headers")));
+        assert!(!hashes.lines().any(|line| line.ends_with("  _redirects")));
+
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn relay_origin_normalizes_secure_and_loopback_origins() {
+        let secure = RelayOriginConfig::parse("wss://relay.example.test:8443///").unwrap();
+        assert_eq!(secure.authority, "relay.example.test:8443");
+        assert_eq!(secure.http_origin, "https://relay.example.test:8443");
+        assert_eq!(secure.websocket_origin, "wss://relay.example.test:8443");
+
+        let default_port = RelayOriginConfig::parse("https://relay.example.test:443/").unwrap();
+        assert_eq!(default_port.http_origin, "https://relay.example.test");
+
+        let localhost = RelayOriginConfig::parse("http://localhost:8765/").unwrap();
+        assert_eq!(localhost.http_origin, "http://localhost:8765");
+        assert_eq!(localhost.websocket_origin, "ws://localhost:8765");
+
+        let ipv4 = RelayOriginConfig::parse("ws://127.0.0.1:9000").unwrap();
+        assert_eq!(ipv4.http_origin, "http://127.0.0.1:9000");
+        let ipv6 = RelayOriginConfig::parse("http://[::1]:9000").unwrap();
+        assert_eq!(ipv6.websocket_origin, "ws://[::1]:9000");
+    }
+
+    #[test]
+    fn relay_origin_rejects_insecure_or_ambiguous_inputs() {
+        for invalid in [
+            "relay.example.test",
+            "http://relay.example.test",
+            "ws://192.0.2.1:9000",
+            "https://user@relay.example.test",
+            "https://relay.example.test/path",
+            "https://relay.example.test/path/..",
+            "https://relay.example.test/%2e%2e",
+            "https://relay.example.test?target=other",
+            "https://relay.example.test#fragment",
+            "https://relay.example.test:",
+            "https://relay..example.test",
+            "https://-relay.example.test",
+            "https://relay.example.test:0",
+            "ftp://relay.example.test",
+            " https://relay.example.test",
+            "https:\\relay.example.test",
+        ] {
+            assert!(
+                RelayOriginConfig::parse(invalid).is_err(),
+                "accepted invalid relay origin: {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn verifier_rejects_runtime_and_csp_disagreement() {
+        let doctored = valid_index_fixture().replace(
+            "content=\"https://relay.example.com\"",
+            "content=\"https://other.example.com\"",
+        );
+        assert!(verify_test_index(&doctored).is_err());
     }
 
     #[test]

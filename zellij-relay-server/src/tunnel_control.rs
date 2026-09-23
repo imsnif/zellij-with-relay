@@ -31,11 +31,14 @@ use zellij_relay_protocol::{
     decode_control_frame, ControlMessage, TunnelErrorCode, SUPPORTED_PROTOCOL_VERSIONS,
 };
 
+use crate::events::{
+    STOP_REASON_CONTROL_SOCKET_CLOSED, STOP_REASON_ESTABLISHED_SEND_FAILED,
+    STOP_REASON_HEARTBEAT_TIMEOUT,
+};
 use crate::heartbeat::{now_millis, spawn_server_heartbeat, HEARTBEAT_TIMEOUT_SECS};
 
-use crate::registry::{PakeResponseResult, TunnelEntry};
-use crate::relay_tunnel_auth_tokens::{
-    hash_relay_tunnel_auth_token, validate_relay_tunnel_auth_token_hash,
+use crate::registry::{
+    generate_terminal_binding_secret, hash_terminal_binding_secret, PakeResponseResult, TunnelEntry,
 };
 use crate::router::AppState;
 use crate::slug;
@@ -77,6 +80,11 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             return;
         },
     };
+    // `first` is the raw serialized auth frame — it holds a plaintext copy of
+    // the account credential. Drop it now so it does not linger for the whole
+    // socket lifetime (paired with the `drop(token)` after authorization
+    // below). Not zeroization, just bounding the lifetime of the copy.
+    drop(first);
 
     let (token, session_name, zellij_version, requested_slug, protocol_version, read_only) = match msg {
         ControlMessage::Auth {
@@ -138,24 +146,22 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         return;
     }
 
-    // Phase 6 Session C: tunnel-auth token check. Empty or unknown token
-    // hashes are rejected uniformly with `TunnelErrorCode::AuthRejected` — the
-    // sharer-side share plugin branches on that code to surface the
-    // `<relay rejected auth token>` state. A DB error is treated as a rejection
-    // as well so mis-provisioned relays never silently admit connections.
-    let hash = hash_relay_tunnel_auth_token(&token);
-    let accepted = match validate_relay_tunnel_auth_token_hash(&hash) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::error!(error = %e, "relay_tunnel_auth_tokens DB error; rejecting tunnel");
-            false
-        },
-    };
-    if !accepted {
+    // Account-credential check, delegated to the configured backend
+    // (standalone `LocalSqlite` or hosted `Online` control-plane
+    // introspection — see `tunnel_auth.rs`). Rejections of every kind
+    // (unknown/empty credential, DB error, backend fail-closed) surface
+    // uniformly with `TunnelErrorCode::AuthRejected` — the sharer-side share
+    // plugin branches on that code to surface the `<relay rejected auth token>`
+    // state.
+    let decision = state.tunnel_auth.authorize(&token).await;
+    // The account credential is not stored in tunnel state or referenced past
+    // authorization (decision #1) — drop it now, before it could ever leak into
+    // the `TunnelEntry` or a later log line.
+    drop(token);
+    if !decision.accepted {
         tracing::info!(
             %zellij_version,
             %session_name,
-            empty_token = token.is_empty(),
             "rejecting tunnel: relay tunnel auth rejected"
         );
         let _ = send_error(
@@ -185,6 +191,8 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     };
     let tunnel_id = Uuid::new_v4();
     let public_url = state.render_public_url(&slug);
+    let binding_secret = generate_terminal_binding_secret();
+    let binding_secret_hash = hash_terminal_binding_secret(&binding_secret);
 
     let (control_tx, mut control_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let entry = Arc::new(TunnelEntry {
@@ -205,18 +213,27 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         viewers: Mutex::new(HashMap::new()),
         sessions: Mutex::new(HashMap::new()),
         client_id_to_viewer: Mutex::new(HashMap::new()),
+        user_id: decision.user_id,
+        credential_id: decision.credential_id,
+        terminal_binding_secret_hash: binding_secret_hash,
     });
     state.registry.insert(entry.clone());
+    state.event_sink.tunnel_started(&entry);
     tracing::info!(%slug, %tunnel_id, %session_name, "tunnel established");
 
     let established = ControlMessage::Established {
         public_url: public_url.clone(),
         slug: slug.clone(),
         tunnel_id: tunnel_id.to_string(),
+        terminal_binding_secret: binding_secret,
     };
     if let Err(e) = socket.send(Message::Binary(established.encode().into())).await {
         tracing::warn!(error = %e, "failed to send TunnelEstablished");
-        state.registry.remove(&slug);
+        if let Some(removed) = state.registry.remove(&slug) {
+            state
+                .event_sink
+                .tunnel_stopped(&removed, STOP_REASON_ESTABLISHED_SEND_FAILED);
+        }
         return;
     }
 
@@ -261,6 +278,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
     // Reader task: dispatch incoming ControlMessages.
     let reader_entry = entry.clone();
+    let mut stop_reason = STOP_REASON_CONTROL_SOCKET_CLOSED;
     'reader: loop {
         let frame = tokio::select! {
             frame = stream.next() => frame,
@@ -270,6 +288,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     "control tunnel silent >{}s — closing",
                     HEARTBEAT_TIMEOUT_SECS
                 );
+                stop_reason = STOP_REASON_HEARTBEAT_TIMEOUT;
                 break 'reader;
             }
         };
@@ -394,6 +413,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
     // Tunnel closing: drop registry entry and force-close all viewers.
     if let Some(removed) = state.registry.remove(&reader_entry.slug) {
+        state.event_sink.tunnel_stopped(&removed, stop_reason);
         let mut viewers = removed.viewers.lock().unwrap();
         for (_client_id, mut handle) in viewers.drain() {
             if let Some(tx) = handle.disconnect_terminal.take() {

@@ -59,6 +59,7 @@ fn e2e_build(sh: &Shell) -> anyhow::Result<()> {
             wasm_clip: false,
             app_origin: None,
             app_host: None,
+            relay_origin: None,
         },
     )
     .context(err_context)?;
@@ -163,6 +164,7 @@ fn build_release(sh: &Shell, no_web: bool) -> anyhow::Result<()> {
             wasm_clip: false,
             app_origin: None,
             app_host: None,
+            relay_origin: None,
         },
     )
     .context(err_context)?;
@@ -255,6 +257,7 @@ fn cross_compile(sh: &Shell, target: &OsString, no_web: bool) -> anyhow::Result<
             wasm_clip: false,
             app_origin: None,
             app_host: None,
+            relay_origin: None,
         },
     )
     .with_context(err_context)?;
