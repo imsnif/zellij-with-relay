@@ -1,11 +1,9 @@
-use std::collections::HashMap;
 use zellij_tile::prelude::*;
 
 use crate::list::{Access, Row, Tone};
 use crate::ui_components::{
-    footer, mask_secret, public_url, render_centered, Block, StatusTone,
+    footer, mask_secret, public_url, Block, StatusTone,
 };
-use crate::CoordinatesInLine;
 
 const INTRO: &str = "Share this session over the internet through zellij.online. Traffic is \
     end-to-end encrypted and you approve each guest with a PIN.";
@@ -33,8 +31,6 @@ const SECRET_VISIBLE: &str = "Secret is visible on screen.";
 const ACTIVE_NOTE: &str = "Used, and its guest is connected. Revoking disconnects them.";
 
 pub struct OnlineView<'a> {
-    pub rows: usize,
-    pub cols: usize,
     pub nav: Vec<crate::ui_components::NavItem>,
     pub status: Option<&'a RelayShareStatus>,
     pub pending: bool,
@@ -44,10 +40,9 @@ pub struct OnlineView<'a> {
     pub prompt: Option<(String, &'a str)>,
     pub pending_admissions: usize,
     pub message: Option<(&'a str, bool)>,
-    pub hover: Option<(usize, usize)>,
 }
 
-pub fn render(mut view: OnlineView<'_>, clickable: &mut HashMap<CoordinatesInLine, String>) {
+pub fn blocks(mut view: OnlineView<'_>) -> Vec<Block> {
     let nav = std::mem::take(&mut view.nav);
     let mut blocks = vec![Block::Nav(nav), Block::Blank];
     blocks.extend(match view.status {
@@ -64,7 +59,7 @@ pub fn render(mut view: OnlineView<'_>, clickable: &mut HashMap<CoordinatesInLin
         None if view.pending => transient_blocks(&view, None),
         None => idle_blocks(&view),
     });
-    render_centered(blocks, view.rows, view.cols, view.hover, clickable);
+    blocks
 }
 
 fn idle_blocks(view: &OnlineView<'_>) -> Vec<Block> {
@@ -155,7 +150,8 @@ fn live_blocks(view: &OnlineView<'_>, url: &str) -> Vec<Block> {
             buffer: (*buffer).to_owned(),
             hint: NEW_LINK_HINT.to_owned(),
         },
-        None => Block::hints(LINK_LABEL_HINT, &actions(view)),
+        None if view.links.is_empty() => Block::hints(LINK_LABEL_HINT, &actions(view)),
+        None => Block::hints_reserving(LINK_LABEL_HINT, &actions(view), &widest_actions()),
     });
 
     let pending = if view.pending_admissions > 0 {
@@ -211,6 +207,13 @@ fn actions(view: &OnlineView<'_>) -> String {
         },
         None => NEW_LINK_ACTIONS.to_owned(),
     }
+}
+
+fn widest_actions() -> String {
+    format!(
+        "<ENTER> copy   <s> reveal   <x> revoke   {}",
+        NEW_LINK_ACTIONS
+    )
 }
 
 fn link_rows(links: &[GuestLink]) -> Vec<Row> {

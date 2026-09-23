@@ -1,9 +1,7 @@
-use std::collections::HashMap;
 use zellij_tile::prelude::*;
 
 use crate::list::{Access, Row, Tone};
-use crate::ui_components::{footer, mask_secret, render_centered, Block, StatusTone};
-use crate::CoordinatesInLine;
+use crate::ui_components::{footer, mask_secret, Block, StatusTone};
 
 const INTRO: &str = "Enrolled devices reconnect to this session without asking for admission \
     again. Enrollment links work once and carry a secret, so send them over a trusted channel.";
@@ -21,8 +19,6 @@ pub enum DeviceRow<'a> {
 }
 
 pub struct DevicesView<'a> {
-    pub rows: usize,
-    pub cols: usize,
     pub nav: Vec<crate::ui_components::NavItem>,
     pub devices: &'a [EnrolledDevice],
     pub enrollments: &'a [GuestLink],
@@ -30,10 +26,9 @@ pub struct DevicesView<'a> {
     pub revealed: Option<&'a [u8]>,
     pub prompt: Option<(String, &'a str)>,
     pub message: Option<(&'a str, bool)>,
-    pub hover: Option<(usize, usize)>,
 }
 
-pub fn render(view: DevicesView<'_>, clickable: &mut HashMap<CoordinatesInLine, String>) {
+pub fn blocks(view: DevicesView<'_>) -> Vec<Block> {
     let rows = device_rows(view.devices, view.enrollments);
     let mut blocks = vec![
         Block::Nav(view.nav.clone()),
@@ -71,7 +66,7 @@ pub fn render(view: DevicesView<'_>, clickable: &mut HashMap<CoordinatesInLine, 
     });
     blocks.push(footer(view.message, SHARE_LABEL, SHARE_HINTS));
 
-    render_centered(blocks, view.rows, view.cols, view.hover, clickable);
+    blocks
 }
 
 pub fn row_at<'a>(

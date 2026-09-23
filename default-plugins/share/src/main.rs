@@ -10,7 +10,7 @@ use std::net::IpAddr;
 use zellij_tile::prelude::*;
 
 use screen_devices::{DeviceRow, DevicesView};
-use ui_components::NavItem;
+use ui_components::{Block, NavItem};
 use screen_local::LocalView;
 use screen_main::OnlineView;
 
@@ -23,6 +23,8 @@ enum Screen {
     Devices,
     Local,
 }
+
+const ALL_SCREENS: [Screen; 3] = [Screen::Main, Screen::Devices, Screen::Local];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Prompt {
@@ -217,11 +219,22 @@ impl ZellijPlugin for App {
                 message,
             );
         } else {
-            match self.screen {
-                Screen::Main => self.render_online(rows, cols, message, &mut clickable),
-                Screen::Devices => self.render_devices(rows, cols, message, &mut clickable),
-                Screen::Local => self.render_local(rows, cols, message, &mut clickable),
-            }
+            let frame = ui_components::shared_frame(
+                ALL_SCREENS
+                    .iter()
+                    .map(|screen| self.screen_blocks(*screen, message))
+                    .collect(),
+                rows,
+                cols,
+            );
+            ui_components::render_in_frame(
+                self.screen_blocks(self.screen, message),
+                frame,
+                rows,
+                cols,
+                self.ui.hover_coordinates,
+                &mut clickable,
+            );
         }
 
         self.ui.clickable_urls = clickable;
@@ -237,86 +250,55 @@ impl App {
         }
     }
 
-    fn render_online(
-        &self,
-        rows: usize,
-        cols: usize,
-        message: Option<(&str, bool)>,
-        clickable: &mut HashMap<CoordinatesInLine, String>,
-    ) {
-        let view = OnlineView {
-            rows,
-            cols,
-            nav: self.nav_items(),
-            status: self.web.relay_share_status.as_ref(),
-            pending: self.pending_mint.is_some(),
-            links: &self.links,
-            selected: self.link_selected,
-            revealed: self.revealed_link.as_deref(),
-            prompt: self.input.view(),
-            pending_admissions: if self.admission_dismissed {
-                self.admissions.len()
-            } else {
-                0
-            },
-            message,
-            hover: self.ui.hover_coordinates,
-        };
-        screen_main::render(view, clickable)
-    }
-
-    fn render_devices(
-        &self,
-        rows: usize,
-        cols: usize,
-        message: Option<(&str, bool)>,
-        clickable: &mut HashMap<CoordinatesInLine, String>,
-    ) {
-        let view = DevicesView {
-            rows,
-            cols,
-            nav: self.nav_items(),
-            devices: &self.devices,
-            enrollments: &self.enrollments,
-            selected: self.device_selected,
-            revealed: self.revealed_link.as_deref(),
-            prompt: self.input.view(),
-            message,
-            hover: self.ui.hover_coordinates,
-        };
-        screen_devices::render(view, clickable)
-    }
-
-    fn render_local(
-        &self,
-        rows: usize,
-        cols: usize,
-        message: Option<(&str, bool)>,
-        clickable: &mut HashMap<CoordinatesInLine, String>,
-    ) {
-        let view = LocalView {
-            rows,
-            cols,
-            nav: self.nav_items(),
-            server_started: self.web.started,
-            server_base_url: &self.web.base_url,
-            server_version_error: self.web.different_version_error.as_deref(),
-            server_ip: self.web.ip,
-            server_port: self.web.port,
-            session_name: self.session_name.as_deref(),
-            sharing: self.web.sharing,
-            tokens: &self.tokens,
-            selected: self.token_selected,
-            new_token: self
-                .new_token
-                .as_ref()
-                .map(|(name, value)| (name.as_str(), value.as_str())),
-            prompt: self.input.view(),
-            confirming_revoke_all: self.confirming_revoke_all,
-            message,
-            hover: self.ui.hover_coordinates,
-        };
-        screen_local::render(view, clickable)
+    fn screen_blocks(&self, screen: Screen, message: Option<(&str, bool)>) -> Vec<Block> {
+        let active = screen == self.screen;
+        let message = message.filter(|_| active);
+        let prompt = if active { self.input.view() } else { None };
+        match screen {
+            Screen::Main => screen_main::blocks(OnlineView {
+                nav: self.nav_items(),
+                status: self.web.relay_share_status.as_ref(),
+                pending: self.pending_mint.is_some(),
+                links: &self.links,
+                selected: self.link_selected,
+                revealed: self.revealed_link.as_deref(),
+                prompt,
+                pending_admissions: if self.admission_dismissed {
+                    self.admissions.len()
+                } else {
+                    0
+                },
+                message,
+            }),
+            Screen::Devices => screen_devices::blocks(DevicesView {
+                nav: self.nav_items(),
+                devices: &self.devices,
+                enrollments: &self.enrollments,
+                selected: self.device_selected,
+                revealed: self.revealed_link.as_deref(),
+                prompt,
+                message,
+            }),
+            Screen::Local => screen_local::blocks(LocalView {
+                nav: self.nav_items(),
+                server_started: self.web.started,
+                server_base_url: &self.web.base_url,
+                server_version_error: self.web.different_version_error.as_deref(),
+                server_ip: self.web.ip,
+                server_port: self.web.port,
+                session_name: self.session_name.as_deref(),
+                sharing: self.web.sharing,
+                tokens: &self.tokens,
+                selected: self.token_selected,
+                new_token: self
+                    .new_token
+                    .as_ref()
+                    .map(|(name, value)| (name.as_str(), value.as_str())),
+                prompt,
+                confirming_revoke_all: active && self.confirming_revoke_all,
+                message,
+            }),
+        }
     }
 
     fn relay_live(&self) -> bool {
@@ -391,7 +373,7 @@ impl App {
     }
 
     fn next_screen(&self) -> Screen {
-        let order = [Screen::Main, Screen::Devices, Screen::Local];
+        let order = ALL_SCREENS;
         let current = order
             .iter()
             .position(|screen| *screen == self.screen)

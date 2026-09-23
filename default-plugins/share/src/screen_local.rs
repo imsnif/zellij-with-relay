@@ -1,10 +1,8 @@
-use std::collections::HashMap;
 use std::net::IpAddr;
 use zellij_tile::prelude::*;
 
 use crate::list::{Access, Row, Tone};
-use crate::ui_components::{footer, render_centered, Block, StatusTone};
-use crate::CoordinatesInLine;
+use crate::ui_components::{footer, Block, StatusTone};
 
 const INTRO: &str = "Serves this session from a web server on this machine. No relay and no \
     account, but the network and its encryption are your responsibility.";
@@ -25,8 +23,6 @@ const SESSION_LABEL: &str = "This session: ";
 const JOIN_LABEL: &str = "Join at:      ";
 
 pub struct LocalView<'a> {
-    pub rows: usize,
-    pub cols: usize,
     pub nav: Vec<crate::ui_components::NavItem>,
     pub server_started: bool,
     pub server_base_url: &'a str,
@@ -41,10 +37,9 @@ pub struct LocalView<'a> {
     pub prompt: Option<(String, &'a str)>,
     pub confirming_revoke_all: bool,
     pub message: Option<(&'a str, bool)>,
-    pub hover: Option<(usize, usize)>,
 }
 
-pub fn render(view: LocalView<'_>, clickable: &mut HashMap<CoordinatesInLine, String>) {
+pub fn blocks(view: LocalView<'_>) -> Vec<Block> {
     let unencrypted = view.server_base_url.starts_with("http://");
 
     let mut blocks = vec![
@@ -101,7 +96,7 @@ pub fn render(view: LocalView<'_>, clickable: &mut HashMap<CoordinatesInLine, St
     }
     blocks.push(footer(view.message, SERVER_LABEL, &help_line(&view)));
 
-    render_centered(blocks, view.rows, view.cols, view.hover, clickable);
+    blocks
 }
 
 fn help_line(view: &LocalView<'_>) -> String {

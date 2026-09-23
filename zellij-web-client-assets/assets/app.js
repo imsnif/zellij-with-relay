@@ -1,7 +1,7 @@
 import { handleDisconnected, handleReconnection, markConnectionEstablished } from "/assets/connection.js";
 import { DIRECTION_SHARER_TO_VIEWER, DIRECTION_VIEWER_TO_SHARER, FRAME_TYPE_CONTROL, FRAME_TYPE_TERMINAL, decrypt, decryptSeq, encrypt, encryptSeq, verifyWasmDigest } from "/assets/crypto.js";
 import { WASM_INTEGRITY } from "/assets/integrity.js";
-import { getBaseUrl, getWsApiBase, isCurrentLocation, isMac, isMobileViewport, isRelayMode } from "/assets/utils.js";
+import { getBaseUrl, getRelayTarget, getWsApiBase, isCurrentLocation, isMac, isMobileViewport, isRelayMode } from "/assets/utils.js";
 
 /**
  * Link handling functions for terminal
@@ -2822,6 +2822,10 @@ function nativeCommand() {
     return `zellij attach "${location.href}"`;
 }
 
+function isOneTimeLink() {
+    return getRelayTarget().linkId !== null;
+}
+
 function mount() {
     if (!isRelayMode()) {
         return;
@@ -2837,26 +2841,33 @@ function mount() {
     label.className = "znp-label";
     label.textContent = "Open in Zellij (recommended for sensitive sessions):";
 
-    const code = document.createElement("code");
-    code.className = "znp-cmd";
-    code.textContent = nativeCommand();
-
-    const copy = document.createElement("button");
-    copy.className = "znp-copy";
-    copy.type = "button";
-    copy.textContent = "Copy";
-    copy.addEventListener("click", async () => {
-        try {
-            await navigator.clipboard.writeText(nativeCommand());
-            copy.textContent = "Copied";
-        } catch (_) {
-            copy.textContent = "Copy failed";
-        }
-    });
-
     const note = document.createElement("span");
     note.className = "znp-note";
     note.textContent = "The native client holds even against a malicious relay.";
+
+    const content = [label];
+    if (isOneTimeLink()) {
+        note.textContent += " To open this session in Zellij, ask the host for a new link.";
+    } else {
+        const code = document.createElement("code");
+        code.className = "znp-cmd";
+        code.textContent = nativeCommand();
+
+        const copy = document.createElement("button");
+        copy.className = "znp-copy";
+        copy.type = "button";
+        copy.textContent = "Copy";
+        copy.addEventListener("click", async () => {
+            try {
+                await navigator.clipboard.writeText(nativeCommand());
+                copy.textContent = "Copied";
+            } catch (_) {
+                copy.textContent = "Copy failed";
+            }
+        });
+        content.push(code, copy);
+    }
+    content.push(note);
 
     const dismiss = document.createElement("button");
     dismiss.className = "znp-dismiss";
@@ -2865,7 +2876,7 @@ function mount() {
     dismiss.textContent = "✕";
     dismiss.addEventListener("click", () => bar.remove());
 
-    bar.append(label, code, copy, note, dismiss);
+    bar.append(...content, dismiss);
     document.body.prepend(bar);
 }
 

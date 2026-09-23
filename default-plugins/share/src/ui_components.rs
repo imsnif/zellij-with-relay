@@ -213,6 +213,7 @@ const PREFERRED_PROSE_WIDTH: usize = 72;
 const PREFERRED_FOOTER_WIDTH: usize = 96;
 const MIN_LIST_ROWS: usize = 3;
 
+#[derive(Clone)]
 pub enum Block {
     Blank,
     Title(String),
@@ -239,6 +240,7 @@ pub enum Block {
     Hints {
         label: String,
         hints: String,
+        reserve: String,
     },
     Nav(Vec<NavItem>),
     Bullets(Vec<String>),
@@ -283,9 +285,14 @@ fn nav_width(items: &[NavItem]) -> usize {
 
 impl Block {
     pub fn hints(label: &str, hints: &str) -> Self {
+        Block::hints_reserving(label, hints, "")
+    }
+
+    pub fn hints_reserving(label: &str, hints: &str, reserve: &str) -> Self {
         Block::Hints {
             label: label.to_owned(),
             hints: hints.to_owned(),
+            reserve: reserve.to_owned(),
         }
     }
 
@@ -385,7 +392,11 @@ impl Block {
     fn soft_width(&self) -> usize {
         match self {
             Block::Paragraph { .. } => PREFERRED_PROSE_WIDTH,
-            Block::Hints { label, hints } => (label.chars().count() + hints.chars().count())
+            Block::Hints {
+                label,
+                hints,
+                reserve,
+            } => (label.chars().count() + hints.chars().count().max(reserve.chars().count()))
                 .min(PREFERRED_FOOTER_WIDTH),
             Block::Url {
                 prefix,
@@ -407,9 +418,18 @@ impl Block {
             Block::Message { text, .. } => word_wrap(text, width).len(),
             Block::Title(text) | Block::Status { text, .. } => word_wrap(text, width).len(),
             Block::Keys(text) => wrap_hints(text, width).len(),
-            Block::Hints { label, hints } => {
-                let label_width = label.chars().count();
-                wrap_hints(hints, width.saturating_sub(label_width).max(1)).len()
+            Block::Hints {
+                label,
+                hints,
+                reserve,
+            } => {
+                let body_width = width.saturating_sub(label.chars().count()).max(1);
+                let reserved = if reserve.is_empty() {
+                    0
+                } else {
+                    wrap_hints(reserve, body_width).len()
+                };
+                wrap_hints(hints, body_width).len().max(reserved)
             },
             Block::Field { label, value, .. } => {
                 let label_width = label.chars().count();
@@ -465,19 +485,14 @@ fn pad_prose(blocks: Vec<Block>) -> Vec<Block> {
     padded
 }
 
-pub fn render_centered(
-    blocks: Vec<Block>,
-    rows: usize,
-    cols: usize,
-    hover: Option<(usize, usize)>,
-    clickable: &mut HashMap<CoordinatesInLine, String>,
-) {
-    if rows == 0 || cols == 0 {
-        return;
-    }
-    let blocks = pad_prose(blocks);
-    let available = cols.saturating_sub(2).max(1);
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Frame {
+    pub width: usize,
+    pub height: usize,
+}
 
+fn natural_frame_width(blocks: &[Block], cols: usize) -> usize {
+    let available = cols.saturating_sub(2).max(1);
     let rigid = blocks
         .iter()
         .map(|block| block.rigid_width())
@@ -488,8 +503,10 @@ pub fn render_centered(
         .map(|block| block.soft_width())
         .max()
         .unwrap_or(0);
-    let width = rigid.max(soft).max(1).min(available);
+    rigid.max(soft).max(1).min(available)
+}
 
+fn fit_heights(blocks: &[Block], rows: usize, width: usize) -> Vec<usize> {
     let mut heights: Vec<usize> = blocks.iter().map(|block| block.height(width)).collect();
 
     if let Some(index) = blocks
@@ -532,9 +549,54 @@ pub fn render_centered(
         }
         heights[index] = heights[index].min(rows.saturating_sub(fixed));
     }
+    heights
+}
+
+pub fn shared_frame(screens: Vec<Vec<Block>>, rows: usize, cols: usize) -> Frame {
+    let screens: Vec<Vec<Block>> = screens.into_iter().map(pad_prose).collect();
+    let width = screens
+        .iter()
+        .map(|blocks| natural_frame_width(blocks, cols))
+        .max()
+        .unwrap_or(1);
+    let height = screens
+        .iter()
+        .map(|blocks| fit_heights(blocks, rows, width).iter().sum())
+        .max()
+        .unwrap_or(0);
+    Frame { width, height }
+}
+
+pub fn render_centered(
+    blocks: Vec<Block>,
+    rows: usize,
+    cols: usize,
+    hover: Option<(usize, usize)>,
+    clickable: &mut HashMap<CoordinatesInLine, String>,
+) {
+    render_in_frame(blocks, Frame::default(), rows, cols, hover, clickable);
+}
+
+pub fn render_in_frame(
+    blocks: Vec<Block>,
+    frame: Frame,
+    rows: usize,
+    cols: usize,
+    hover: Option<(usize, usize)>,
+    clickable: &mut HashMap<CoordinatesInLine, String>,
+) {
+    if rows == 0 || cols == 0 {
+        return;
+    }
+    let blocks = pad_prose(blocks);
+    let available = cols.saturating_sub(2).max(1);
+    let width = natural_frame_width(&blocks, cols)
+        .max(frame.width)
+        .min(available);
+    let heights = fit_heights(&blocks, rows, width);
 
     let total: usize = heights.iter().sum();
-    let mut y = rows.saturating_sub(total) / 2;
+    let mut y = rows.saturating_sub(total.max(frame.height)) / 2;
     let x = (cols.saturating_sub(width)) / 2;
 
     for (block, height) in blocks.into_iter().zip(heights) {
@@ -804,7 +866,7 @@ fn draw_block(
                 offset += item.label.chars().count() + RIBBON_PADDING;
             }
         },
-        Block::Hints { label, hints } => {
+        Block::Hints { label, hints, .. } => {
             let label_width = label.chars().count();
             let body_width = width.saturating_sub(label_width).max(1);
             for (offset, line) in wrap_hints(&hints, body_width)
