@@ -1725,6 +1725,10 @@ pub(crate) mod test_support {
         );
         ctrl_out_rx
     }
+
+    pub(crate) fn gc_spent_link(state: &Arc<RelayTunnelState>, link_id: &LinkId) {
+        super::gc_spent_single_use_link(state, link_id);
+    }
 }
 
 #[cfg(test)]

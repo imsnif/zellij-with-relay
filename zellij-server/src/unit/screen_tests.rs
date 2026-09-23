@@ -9950,6 +9950,29 @@ fn recompute_tab_size_uses_lone_viewer_size() {
 }
 
 #[test]
+fn recompute_tab_size_accounts_for_the_session_creating_client() {
+    let initial_size = Size { cols: 80, rows: 24 };
+    let mut screen = create_new_screen(initial_size, true, true);
+    new_tab(&mut screen, 1, 0);
+
+    let attaching_client_id = 2;
+    screen.set_client_size(
+        attaching_client_id,
+        Size {
+            cols: 200,
+            rows: 60,
+        },
+    );
+    screen.add_client(attaching_client_id, false).expect("TEST");
+
+    assert_eq!(
+        screen.tabs.get(&0).unwrap().size,
+        initial_size,
+        "A larger attaching client must not grow the tab beyond the session-creating client"
+    );
+}
+
+#[test]
 fn recompute_tab_size_takes_independent_min_across_axes() {
     let initial_size = Size {
         cols: 200,
@@ -11362,6 +11385,62 @@ fn attaching_terminal_client_follows_the_host_tab() {
     assert!(
         screen.tabs.get(&1).unwrap().are_floating_panes_visible(),
         "the floating surface remains visible"
+    );
+}
+
+#[test]
+fn relay_watcher_tracks_the_followed_tab_size_instead_of_the_session_start_size() {
+    let session_start_size = Size { cols: 80, rows: 24 };
+    let (mut screen, messages) = create_new_screen_with_message_capture(session_start_size);
+    new_tab(&mut screen, 1, 0);
+    screen.followed_client_id = Some(1);
+
+    let grown_size = Size {
+        cols: 150,
+        rows: 40,
+    };
+    screen.set_client_size(1, grown_size);
+    screen.recompute_tab_size(0).expect("TEST");
+
+    let relay_watcher_id = 2;
+    screen
+        .add_relay_watcher_client(relay_watcher_id)
+        .expect("TEST");
+    assert_eq!(
+        screen.watcher_clients.get(&relay_watcher_id).unwrap().size(),
+        grown_size,
+        "a relay watcher must start at the size of the tab it is shown"
+    );
+
+    let shrunk_size = Size {
+        cols: 100,
+        rows: 30,
+    };
+    screen.set_client_size(1, shrunk_size);
+    screen.recompute_tab_size(0).expect("TEST");
+    screen.render_to_clients().expect("TEST");
+
+    assert_eq!(
+        screen.watcher_clients.get(&relay_watcher_id).unwrap().size(),
+        shrunk_size,
+        "a relay watcher must follow the shown tab when the sharer resizes"
+    );
+    let reported_sizes: Vec<(u32, u32)> = messages
+        .lock()
+        .unwrap()
+        .get(&relay_watcher_id)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|msg| match msg {
+            ServerToClientMsg::SessionSize { rows, cols } => Some((rows, cols)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        reported_sizes,
+        vec![(40, 150), (30, 100)],
+        "the relay watcher must be told about every viewport size it is rendered at"
     );
 }
 

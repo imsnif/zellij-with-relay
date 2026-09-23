@@ -38,6 +38,14 @@ impl NestedListItem {
         self.content = self.content.color_range(index_level, indices);
         self
     }
+    pub fn unbold_indices(mut self, indices: Vec<usize>) -> Self {
+        self.content = self.content.unbold_indices(indices);
+        self
+    }
+    pub fn unbold_range<R: RangeBounds<usize>>(mut self, indices: R) -> Self {
+        self.content = self.content.unbold_range(indices);
+        self
+    }
     pub fn error_color_indices(mut self, indices: Vec<usize>) -> Self {
         self.content = self.content.error_color_indices(indices);
         self

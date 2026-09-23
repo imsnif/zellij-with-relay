@@ -184,8 +184,7 @@ pub fn list() -> Vec<GuestLinkInfo> {
             .iter()
             .flat_map(|state| crate::multiplexer::client_link_ids(state))
             .collect();
-        let mut credentials = tunnel.credentials.lock().unwrap();
-        let mut dead: Vec<LinkId> = Vec::new();
+        let credentials = tunnel.credentials.lock().unwrap();
         for (id, credential) in credentials.iter() {
             if *id == SEED_LINK_ID {
                 continue;
@@ -199,7 +198,6 @@ pub fn list() -> Vec<GuestLinkInfo> {
             let active = connected.contains(id);
             let spent = credential.spent.load(std::sync::atomic::Ordering::Relaxed);
             if credential.kind == CredentialKind::Link && spent && !active {
-                dead.push(*id);
                 continue;
             }
             let secret = String::from_utf8_lossy(&credential.secret).into_owned();
@@ -212,9 +210,6 @@ pub fn list() -> Vec<GuestLinkInfo> {
                 spent,
                 active,
             });
-        }
-        for id in dead {
-            credentials.remove(&id);
         }
     }
     out.sort_by(|a, b| a.label.cmp(&b.label).then(a.link_id.cmp(&b.link_id)));
@@ -357,7 +352,43 @@ mod tests {
     }
 
     #[test]
-    fn spent_link_without_connected_client_is_removed_by_list() {
+    fn spent_link_is_not_destroyed_by_a_query_before_its_client_registers() {
+        let _guard = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        clear();
+        let (state, _ctrl_rx) = crate::multiplexer::test_support::make_state();
+        let link_id = [13u8; 16];
+        state.credentials.lock().unwrap().insert(
+            link_id,
+            Arc::new(GuestCredential {
+                link_id,
+                secret: b"483921".to_vec(),
+                kind: CredentialKind::Link,
+                access: CredentialAccess::ReadWrite,
+                label: "Dave".to_string(),
+                enroll: false,
+                spent: AtomicBool::new(true),
+            }),
+        );
+        register_tunnel("https://host/r/slug".to_string(), state.credentials.clone());
+        register_state(&state);
+
+        assert!(list().is_empty());
+        assert!(
+            state.credentials.lock().unwrap().contains_key(&link_id),
+            "a query must not delete a spent credential whose client has not registered yet"
+        );
+
+        let _client_rx =
+            crate::multiplexer::test_support::insert_connected_client(&state, 1, link_id);
+        let links = list();
+        assert_eq!(links.len(), 1, "the link must reappear once its guest connects");
+        assert!(links[0].active);
+        assert!(links[0].spent);
+        clear();
+    }
+
+    #[test]
+    fn spent_link_without_connected_client_is_not_listed() {
         let _guard = TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         clear();
         let (state, _ctrl_rx) = crate::multiplexer::test_support::make_state();
@@ -378,6 +409,7 @@ mod tests {
         register_state(&state);
 
         assert!(list().is_empty());
+        crate::multiplexer::test_support::gc_spent_link(&state, &link_id);
         assert!(!state.credentials.lock().unwrap().contains_key(&link_id));
         clear();
     }

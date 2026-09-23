@@ -273,7 +273,7 @@ export function initWebSockets(
         markConnectionEstablished();
     };
 
-    wsTerminal.onmessage = async function (event) {
+    const handleTerminalFrame = async function (event) {
         let data = event.data;
         // Under r/o, keep the raw plaintext bytes separately so they can
         // feed the clipper directly (avoids a UTF-8 round-trip).
@@ -402,6 +402,15 @@ export function initWebSockets(
         }
 
         term.write(data);
+    };
+
+    let terminalRecvChain = Promise.resolve();
+    wsTerminal.onmessage = function (event) {
+        terminalRecvChain = terminalRecvChain
+            .then(() => handleTerminalFrame(event))
+            .catch((err) => {
+                console.error("terminal frame handling failed:", err);
+            });
     };
 
     wsTerminal.onclose = function (event) {

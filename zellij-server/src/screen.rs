@@ -1413,6 +1413,7 @@ pub(crate) struct WatcherState {
     /// ciphertext stream produced by `Output::serialize_with_size` matches
     /// the real session viewport for any number of browser viewers.
     is_relay_fanout: bool,
+    should_clear_screen: bool,
 }
 
 impl WatcherState {
@@ -1421,6 +1422,7 @@ impl WatcherState {
             size,
             should_force_render: true,
             is_relay_fanout: false,
+            should_clear_screen: false,
         }
     }
 
@@ -1429,6 +1431,7 @@ impl WatcherState {
             size,
             should_force_render: true,
             is_relay_fanout: true,
+            should_clear_screen: false,
         }
     }
 
@@ -4082,7 +4085,9 @@ impl Screen {
 
         // === PHASE 2: Render for watchers ===
         if has_watchers {
+            self.sync_relay_watcher_sizes();
             if let Some(followed_client_id) = self.followed_client_id {
+                let followed_viewport = self.followed_viewport_size();
                 // Create fresh output for watchers
                 let mut watcher_output = Output::new(
                     self.sixel_image_store.clone(),
@@ -4132,12 +4137,20 @@ impl Screen {
 
                         // Serialize this watcher's output with size constraints (cropping and padding handled inside)
                         let mut serialized_output = watcher_specific_output
-                            .serialize_with_size(Some(watcher_state.size()), Some(self.size))
+                            .serialize_with_size(
+                                Some(watcher_state.size()),
+                                Some(followed_viewport),
+                            )
                             .context(err_context)?;
 
                         // Get the output for the followed client and map it to this watcher
                         if let Some(followed_output) = serialized_output.remove(&followed_client_id)
                         {
+                            let followed_output = if watcher_state.should_clear_screen {
+                                format!("\u{1b}[m\u{1b}[2J{}", followed_output)
+                            } else {
+                                followed_output
+                            };
                             watcher_render_output.insert(*watcher_id, followed_output);
                         }
                     }
@@ -4154,6 +4167,7 @@ impl Screen {
                     // Clear force render flag for all watchers after successful render
                     for watcher_state in self.watcher_clients.values_mut() {
                         watcher_state.clear_force_render();
+                        watcher_state.should_clear_screen = false;
                     }
                 }
             }
@@ -4623,6 +4637,9 @@ impl Screen {
         }
 
         let is_watcher = self.watcher_clients.contains_key(&client_id);
+        if !is_watcher {
+            self.client_sizes.entry(client_id).or_insert(self.size);
+        }
         let attach_to_first_tab_on_tiled_surface = is_web_client && !is_watcher;
         let first_tab_index = self
             .tabs
@@ -4801,7 +4818,7 @@ impl Screen {
     /// viewport size. Subsequent `resize_to_screen` updates propagate to
     /// every watcher with `is_relay_fanout == true`.
     pub fn add_relay_watcher_client(&mut self, client_id: ClientId) -> Result<()> {
-        let size = self.size;
+        let size = self.followed_viewport_size();
         self.watcher_clients
             .insert(client_id, WatcherState::new_relay_fanout(size));
         if let Some(os_input) = &self.bus.os_input {
@@ -4835,6 +4852,30 @@ impl Screen {
                     },
                 );
             }
+        }
+    }
+
+    fn followed_viewport_size(&self) -> Size {
+        self.followed_client_id
+            .and_then(|client_id| self.active_tab_ids.get(&client_id))
+            .and_then(|tab_index| self.tabs.get(tab_index))
+            .map(|tab| tab.size)
+            .unwrap_or(self.size)
+    }
+
+    fn sync_relay_watcher_sizes(&mut self) {
+        let viewport = self.followed_viewport_size();
+        let mut changed = false;
+        for watcher_state in self.watcher_clients.values_mut() {
+            if watcher_state.is_relay_fanout() && watcher_state.size() != viewport {
+                watcher_state.set_size(viewport);
+                watcher_state.set_force_render();
+                watcher_state.should_clear_screen = true;
+                changed = true;
+            }
+        }
+        if changed {
+            self.broadcast_session_size_to_relay_watchers(viewport);
         }
     }
 

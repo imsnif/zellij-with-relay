@@ -1,759 +1,897 @@
-use std::net::IpAddr;
+use std::collections::HashMap;
 use zellij_tile::prelude::*;
 
 use crate::CoordinatesInLine;
-use std::collections::HashMap;
 
-pub const USAGE_TITLE: &str = "How it works:";
-pub const FIRST_TIME_USAGE_TITLE: &str = "Before logging in for the first time:";
-pub const FIRST_TIME_BULLETIN_1: &str = "- Press <t> to generate a login token";
-pub const BULLETIN_1_FULL: &str = "- Visit base URL to start a new session";
-pub const BULLETIN_1_SHORT: &str = "- Base URL: new session";
-pub const BULLETIN_2_FULL: &str = "- Follow base URL with a session name to attach to or create it";
-pub const BULLETIN_2_SHORT: &str = "- Base URL + session name: attach or create";
-pub const BULLETIN_3_FULL: &str =
-    "- By default sessions not started from the web must be explicitly shared";
-pub const BULLETIN_3_SHORT: &str = "- Sessions not started from the web must be explicitly shared";
-pub const BULLETIN_4: &str = "- <t> manage login tokens";
 
-pub const WEB_SERVER_TITLE: &str = "Web server: ";
-pub const WEB_SERVER_RUNNING: &str = "RUNNING ";
-pub const WEB_SERVER_NOT_RUNNING: &str = "NOT RUNNING";
-pub const WEB_SERVER_INCOMPATIBLE_PREFIX: &str = "RUNNING INCOMPATIBLE VERSION ";
-pub const CTRL_C_STOP: &str = "(<Ctrl c> - Stop)";
-pub const CTRL_C_STOP_OTHER: &str = "<Ctrl c> - Stop other server";
-pub const PRESS_ENTER_START: &str = "Press <ENTER> to start";
-pub const ERROR_PREFIX: &str = "ERROR: ";
-pub const URL_TITLE: &str = "URL: ";
-pub const UNENCRYPTED_MARKER: &str = " [*]";
 
-pub const CURRENT_SESSION_TITLE: &str = "Current session: ";
-pub const SESSION_URL_TITLE: &str = "Session URL: ";
-pub const SHARING_STATUS: &str = "SHARING (<SPACE> - Stop Sharing)";
-pub const SHARING_DISABLED: &str = "SHARING IS DISABLED";
-pub const NOT_SHARING: &str = "NOT SHARING";
-pub const PRESS_SPACE_SHARE: &str = "Press <SPACE> to share";
-pub const WEB_SERVER_OFFLINE: &str = "...but web server is offline";
+pub fn word_wrap(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.is_empty() {
+        return vec![String::new()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in words {
+        let wc = word.chars().count();
+        if current.is_empty() {
+            current = word.to_string();
+        } else if current.chars().count() + 1 + wc <= width {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            lines.push(current);
+            current = word.to_string();
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
 
-pub const COLOR_INDEX_0: usize = 0;
-pub const COLOR_INDEX_1: usize = 1;
-pub const COLOR_INDEX_2: usize = 2;
-pub const COLOR_HIGHLIGHT: usize = 3;
+pub fn chunk(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return vec![String::new()];
+    }
+    chars
+        .chunks(width)
+        .map(|c| c.iter().collect::<String>())
+        .collect()
+}
+
+pub const HINT_SEP: &str = "   ";
+
+pub fn wrap_hints(text: &str, width: usize) -> Vec<String> {
+    if width == 0 || text.chars().count() <= width {
+        return vec![text.to_string()];
+    }
+    let separator_width = HINT_SEP.chars().count();
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    for part in text.split(HINT_SEP) {
+        let needed = current.chars().count() + separator_width + part.chars().count();
+        if !current.is_empty() && needed > width {
+            lines.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push_str(HINT_SEP);
+        }
+        current.push_str(part);
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+
+    if lines.iter().any(|line| line.chars().count() > width) {
+        return word_wrap(text, width);
+    }
+    lines
+}
+
+pub const HIDDEN: &str = "<hidden>";
+
+pub fn mask_secret(url: &str) -> String {
+    let Some(fragment_start) = url.find('#') else {
+        return url.to_string();
+    };
+    let (head, tail) = url.split_at(fragment_start + 1);
+    let masked = tail
+        .split('&')
+        .map(|part| {
+            if part.starts_with("k=") {
+                format!("k={}", HIDDEN)
+            } else {
+                part.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("{}{}", head, masked)
+}
+
+pub fn truncate_end(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_string();
+    }
+    if max <= 3 {
+        return text.chars().take(max).collect();
+    }
+    let kept: String = text.chars().take(max - 3).collect();
+    format!("{}...", kept)
+}
+
+pub fn wrap_bullet(line: &str, width: usize) -> Vec<String> {
+    if line.chars().count() <= width {
+        return vec![line.to_string()];
+    }
+    let indent = line
+        .find('>')
+        .map(|index| {
+            let rest = &line[index + 1..];
+            index + 1 + (rest.len() - rest.trim_start().len())
+        })
+        .filter(|indent| indent + 12 <= width)
+        .unwrap_or(0);
+    let body_width = width.saturating_sub(indent).max(1);
+    word_wrap(&line[indent..], body_width)
+        .into_iter()
+        .enumerate()
+        .map(|(position, part)| {
+            if position == 0 {
+                format!("{}{}", &line[..indent], part)
+            } else {
+                format!("{}{}", " ".repeat(indent), part)
+            }
+        })
+        .collect()
+}
+
+pub fn wrap_after_label(text: &str, body_width: usize, chunked: bool) -> Vec<String> {
+    let body_width = body_width.max(1);
+    if chunked {
+        chunk(text, body_width)
+    } else {
+        word_wrap(text, body_width)
+    }
+}
+
+pub fn elide(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_string();
+    }
+    if max <= 3 {
+        return text.chars().take(max).collect();
+    }
+    let keep = max - 3;
+    let head = keep.div_ceil(2);
+    let tail = keep - head;
+    let chars: Vec<char> = text.chars().collect();
+    let head_part: String = chars[..head].iter().collect();
+    let tail_part: String = chars[count - tail..].iter().collect();
+    format!("{}...{}", head_part, tail_part)
+}
+
+pub fn pad(text: &str, width: usize) -> String {
+    let count = text.chars().count();
+    if count >= width {
+        return text.to_string();
+    }
+    let mut out = text.to_string();
+    out.extend(std::iter::repeat_n(' ', width - count));
+    out
+}
+
+pub const VALUE: usize = 1;
+pub const TITLE: usize = 2;
+pub const KEY: usize = 3;
+
+pub fn quiet(line: &str) -> Text {
+    Text::new(line).unbold_range(..)
+}
+
+pub fn highlight_keys(line: &str) -> Text {
+    let mut text = Text::new(line);
+    let chars: Vec<char> = line.chars().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '<' {
+            if let Some(offset) = chars[index..].iter().position(|c| *c == '>') {
+                text = text.color_range(KEY, index..index + offset + 1);
+                index += offset + 1;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    text
+}
+
+pub fn public_url(url: &str) -> &str {
+    url.split('#').next().unwrap_or(url)
+}
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusTone {
+    Neutral,
+    Good,
+    Alert,
+}
+
+const PREFERRED_PROSE_WIDTH: usize = 72;
+const PREFERRED_FOOTER_WIDTH: usize = 96;
+const MIN_LIST_ROWS: usize = 3;
+
+pub enum Block {
+    Blank,
+    Title(String),
+    Status {
+        text: String,
+        tone: StatusTone,
+    },
+    Field {
+        label: String,
+        value: String,
+        tone: StatusTone,
+    },
+    Paragraph {
+        text: String,
+    },
+    Url {
+        prefix: String,
+        prefix_tone: Option<StatusTone>,
+        display: String,
+        target: String,
+        crop: bool,
+    },
+    Keys(String),
+    Hints {
+        label: String,
+        hints: String,
+    },
+    Nav(Vec<NavItem>),
+    Bullets(Vec<String>),
+    Prompt {
+        label: String,
+        buffer: String,
+        hint: String,
+    },
+    Message {
+        text: String,
+        is_error: bool,
+    },
+    List {
+        rows: Vec<crate::list::Row>,
+        selected: Option<usize>,
+    },
+    Empty {
+        message: String,
+        keys: String,
+    },
+}
 
 #[derive(Debug, Clone)]
-pub struct ColorRange {
-    pub start: usize,
-    pub end: usize,
-    pub color: usize,
+pub struct NavItem {
+    pub label: String,
+    pub selected: bool,
+    pub enabled: bool,
 }
 
-// TODO: move this API to zellij-tile
-#[derive(Debug)]
-pub struct ColoredTextBuilder {
-    text: String,
-    ranges: Vec<ColorRange>,
+const NAV_KEY: &str = "<TAB>";
+const NAV_GAP: usize = 2;
+const RIBBON_PADDING: usize = 4;
+
+fn nav_width(items: &[NavItem]) -> usize {
+    NAV_KEY.chars().count()
+        + NAV_GAP
+        + items
+            .iter()
+            .map(|item| item.label.chars().count() + RIBBON_PADDING)
+            .sum::<usize>()
 }
 
-impl ColoredTextBuilder {
-    pub fn new(text: String) -> Self {
-        Self {
-            text,
-            ranges: Vec::new(),
+impl Block {
+    pub fn hints(label: &str, hints: &str) -> Self {
+        Block::Hints {
+            label: label.to_owned(),
+            hints: hints.to_owned(),
         }
     }
 
-    pub fn highlight_substring(mut self, substring: &str, color: usize) -> Self {
-        if let Some(start) = self.text.find(substring) {
-            let end = start + substring.chars().count();
-            self.ranges.push(ColorRange { start, end, color });
-        }
-        self
-    }
-
-    pub fn highlight_range(mut self, start: usize, end: usize, color: usize) -> Self {
-        self.ranges.push(ColorRange { start, end, color });
-        self
-    }
-
-    pub fn highlight_from_start(mut self, start: usize, color: usize) -> Self {
-        let end = self.text.chars().count();
-        self.ranges.push(ColorRange { start, end, color });
-        self
-    }
-
-    pub fn highlight_all(mut self, color: usize) -> Self {
-        let end = self.text.chars().count();
-        self.ranges.push(ColorRange {
-            start: 0,
-            end,
-            color,
-        });
-        self
-    }
-
-    pub fn build(self) -> (Text, usize) {
-        let length = self.text.chars().count();
-        let mut text_component = Text::new(self.text);
-
-        for range in self.ranges {
-            text_component = text_component.color_range(range.color, range.start..range.end);
-        }
-
-        (text_component, length)
-    }
-}
-
-// create titled text with different colors for title and value
-fn create_titled_text(
-    title: &str,
-    value: &str,
-    title_color: usize,
-    value_color: usize,
-) -> (Text, usize) {
-    let full_text = format!("{}{}", title, value);
-    ColoredTextBuilder::new(full_text)
-        .highlight_range(0, title.chars().count(), title_color)
-        .highlight_from_start(title.chars().count(), value_color)
-        .build()
-}
-
-// to create text with a highlighted shortcut key
-fn create_highlighted_shortcut(text: &str, shortcut: &str, color: usize) -> (Text, usize) {
-    ColoredTextBuilder::new(text.to_string())
-        .highlight_substring(shortcut, color)
-        .build()
-}
-
-fn get_text_with_fallback(
-    full_text: &'static str,
-    short_text: &'static str,
-    max_width: usize,
-) -> &'static str {
-    if full_text.chars().count() <= max_width {
-        full_text
-    } else {
-        short_text
-    }
-}
-
-fn calculate_max_length(texts: &[&str]) -> usize {
-    texts
-        .iter()
-        .map(|text| text.chars().count())
-        .max()
-        .unwrap_or(0)
-}
-
-fn format_url_with_encryption_marker(base_url: &str, is_unencrypted: bool) -> String {
-    if is_unencrypted {
-        format!("{}{}", base_url, UNENCRYPTED_MARKER)
-    } else {
-        base_url.to_string()
-    }
-}
-
-#[derive(Debug)]
-pub struct Usage {
-    has_login_tokens: bool,
-    first_time_usage_title: &'static str,
-    first_time_bulletin_1: &'static str,
-    usage_title: &'static str,
-    bulletin_1_full: &'static str,
-    bulletin_1_short: &'static str,
-    bulletin_2_full: &'static str,
-    bulletin_2_short: &'static str,
-    bulletin_3_full: &'static str,
-    bulletin_3_short: &'static str,
-    bulletin_4: &'static str,
-}
-
-impl Usage {
-    pub fn new(has_login_tokens: bool) -> Self {
-        Usage {
-            has_login_tokens,
-            usage_title: USAGE_TITLE,
-            bulletin_1_full: BULLETIN_1_FULL,
-            bulletin_1_short: BULLETIN_1_SHORT,
-            bulletin_2_full: BULLETIN_2_FULL,
-            bulletin_2_short: BULLETIN_2_SHORT,
-            bulletin_3_full: BULLETIN_3_FULL,
-            bulletin_3_short: BULLETIN_3_SHORT,
-            bulletin_4: BULLETIN_4,
-            first_time_usage_title: FIRST_TIME_USAGE_TITLE,
-            first_time_bulletin_1: FIRST_TIME_BULLETIN_1,
+    pub fn status(text: &str, tone: StatusTone) -> Self {
+        Block::Status {
+            text: text.to_owned(),
+            tone,
         }
     }
 
-    pub fn usage_width_and_height(&self, max_width: usize) -> (usize, usize) {
-        if self.has_login_tokens {
-            self.full_usage_width_and_height(max_width)
-        } else {
-            self.first_time_usage_width_and_height(max_width)
+    pub fn paragraph(text: &str) -> Self {
+        Block::Paragraph {
+            text: text.to_owned(),
         }
     }
 
-    pub fn full_usage_width_and_height(&self, max_width: usize) -> (usize, usize) {
-        let bulletin_1 =
-            get_text_with_fallback(self.bulletin_1_full, self.bulletin_1_short, max_width);
-        let bulletin_2 =
-            get_text_with_fallback(self.bulletin_2_full, self.bulletin_2_short, max_width);
-        let bulletin_3 =
-            get_text_with_fallback(self.bulletin_3_full, self.bulletin_3_short, max_width);
-
-        let texts = &[
-            self.usage_title,
-            bulletin_1,
-            bulletin_2,
-            bulletin_3,
-            self.bulletin_4,
-        ];
-        let width = calculate_max_length(texts);
-        let height = 5;
-        (width, height)
-    }
-
-    pub fn first_time_usage_width_and_height(&self, _max_width: usize) -> (usize, usize) {
-        let texts = &[self.first_time_usage_title, self.first_time_bulletin_1];
-        let width = calculate_max_length(texts);
-        let height = 2;
-        (width, height)
-    }
-
-    pub fn render_usage(&self, x: usize, y: usize, max_width: usize) {
-        if self.has_login_tokens {
-            self.render_full_usage(x, y, max_width)
-        } else {
-            self.render_first_time_usage(x, y)
+    pub fn url(prefix: &str, display: &str, target: &str) -> Self {
+        Block::Url {
+            prefix: prefix.to_owned(),
+            prefix_tone: None,
+            display: display.to_owned(),
+            target: target.to_owned(),
+            crop: false,
         }
     }
 
-    pub fn render_full_usage(&self, x: usize, y: usize, max_width: usize) {
-        let bulletin_1 =
-            get_text_with_fallback(self.bulletin_1_full, self.bulletin_1_short, max_width);
-        let bulletin_2 =
-            get_text_with_fallback(self.bulletin_2_full, self.bulletin_2_short, max_width);
-        let bulletin_3 =
-            get_text_with_fallback(self.bulletin_3_full, self.bulletin_3_short, max_width);
-
-        let usage_title = ColoredTextBuilder::new(self.usage_title.to_string())
-            .highlight_all(COLOR_INDEX_2)
-            .build()
-            .0;
-
-        let bulletin_1_text = Text::new(bulletin_1);
-        let bulletin_2_text = Text::new(bulletin_2);
-        let bulletin_3_text = Text::new(bulletin_3);
-
-        let bulletin_4_text =
-            create_highlighted_shortcut(self.bulletin_4, "<t>", COLOR_HIGHLIGHT).0;
-
-        let texts_and_positions = vec![
-            (usage_title, y),
-            (bulletin_1_text, y + 1),
-            (bulletin_2_text, y + 2),
-            (bulletin_3_text, y + 3),
-            (bulletin_4_text, y + 4),
-        ];
-
-        for (text, y_pos) in texts_and_positions {
-            print_text_with_coordinates(text, x, y_pos, None, None);
+    pub fn cropped_url(prefix: &str, display: &str, target: &str) -> Self {
+        Block::Url {
+            prefix: prefix.to_owned(),
+            prefix_tone: None,
+            display: display.to_owned(),
+            target: target.to_owned(),
+            crop: true,
         }
     }
 
-    pub fn render_first_time_usage(&self, x: usize, y: usize) {
-        let usage_title = ColoredTextBuilder::new(self.first_time_usage_title.to_string())
-            .highlight_all(COLOR_INDEX_1)
-            .build()
-            .0;
+    pub fn status_url(prefix: &str, tone: StatusTone, display: &str, target: &str) -> Self {
+        Block::Url {
+            prefix: prefix.to_owned(),
+            prefix_tone: Some(tone),
+            display: display.to_owned(),
+            target: target.to_owned(),
+            crop: false,
+        }
+    }
 
-        let bulletin_1 =
-            create_highlighted_shortcut(self.first_time_bulletin_1, "<t>", COLOR_HIGHLIGHT).0;
+    pub fn keys(text: &str) -> Self {
+        Block::Keys(text.to_owned())
+    }
 
-        print_text_with_coordinates(usage_title, x, y, None, None);
-        print_text_with_coordinates(bulletin_1, x, y + 1, None, None);
+    pub fn field(label: &str, value: &str, tone: StatusTone) -> Self {
+        Block::Field {
+            label: label.to_owned(),
+            value: value.to_owned(),
+            tone,
+        }
+    }
+
+    fn rigid_width(&self) -> usize {
+        match self {
+            Block::Blank => 0,
+            Block::Title(text) | Block::Keys(text) | Block::Status { text, .. } => {
+                text.chars().count()
+            },
+            Block::Hints { .. } => 0,
+            Block::Nav(items) => nav_width(items),
+            Block::Field { label, value, .. } => label.chars().count() + value.chars().count(),
+            Block::Paragraph { .. } => 0,
+            Block::Url {
+                prefix,
+                display,
+                crop,
+                ..
+            } => {
+                if *crop {
+                    0
+                } else {
+                    prefix.chars().count() + display.chars().count()
+                }
+            },
+            Block::Bullets(lines) => lines
+                .iter()
+                .map(|line| line.chars().count() + 3)
+                .max()
+                .unwrap_or(0),
+            Block::Prompt {
+                label,
+                buffer,
+                hint,
+            } => label.chars().count() + buffer.chars().count() + hint.chars().count() + 2,
+            Block::Message { .. } => 0,
+            Block::List { rows, .. } => crate::list::natural_width(rows),
+            Block::Empty { keys, .. } => keys.chars().count() + 1,
+        }
+    }
+
+    fn soft_width(&self) -> usize {
+        match self {
+            Block::Paragraph { .. } => PREFERRED_PROSE_WIDTH,
+            Block::Hints { label, hints } => (label.chars().count() + hints.chars().count())
+                .min(PREFERRED_FOOTER_WIDTH),
+            Block::Url {
+                prefix,
+                display,
+                crop: true,
+                ..
+            } => (prefix.chars().count() + display.chars().count()).min(PREFERRED_PROSE_WIDTH),
+            Block::Message { text, .. } => text.chars().count().min(PREFERRED_FOOTER_WIDTH),
+            Block::Empty { message, .. } => {
+                (message.chars().count() + 1).min(PREFERRED_PROSE_WIDTH)
+            },
+            _ => 0,
+        }
+    }
+
+    fn height(&self, width: usize) -> usize {
+        match self {
+            Block::Paragraph { text, .. } => word_wrap(text, width).len(),
+            Block::Message { text, .. } => word_wrap(text, width).len(),
+            Block::Title(text) | Block::Status { text, .. } => word_wrap(text, width).len(),
+            Block::Keys(text) => wrap_hints(text, width).len(),
+            Block::Hints { label, hints } => {
+                let label_width = label.chars().count();
+                wrap_hints(hints, width.saturating_sub(label_width).max(1)).len()
+            },
+            Block::Field { label, value, .. } => {
+                let label_width = label.chars().count();
+                if label_width + 4 >= width {
+                    1 + word_wrap(value, width).len()
+                } else {
+                    wrap_after_label(value, width - label_width, false).len()
+                }
+            },
+            Block::Url { crop: true, .. } => 1,
+            Block::Url {
+                prefix, display, ..
+            } => {
+                let prefix_width = prefix.chars().count();
+                if prefix_width + 8 >= width {
+                    1 + chunk(display, width).len()
+                } else {
+                    wrap_after_label(display, width - prefix_width, true).len()
+                }
+            },
+            Block::Bullets(lines) => lines
+                .iter()
+                .map(|line| wrap_bullet(line, width.saturating_sub(3)).len())
+                .sum(),
+            Block::Empty { message, keys } => {
+                let inner = width.saturating_sub(1);
+                word_wrap(message, inner).len() + wrap_hints(keys, inner).len()
+            },
+            Block::List { rows, .. } => crate::list::natural_height(rows, width),
+            _ => 1,
+        }
     }
 }
 
-#[derive(Debug)]
-pub struct WebServerStatusSection {
-    web_server_started: bool,
-    web_server_base_url: String,
-    web_server_error: Option<String>,
-    web_server_different_version_error: Option<String>,
-    connection_is_unencrypted: bool,
-    pub clickable_urls: HashMap<CoordinatesInLine, String>,
-    pub currently_hovering_over_link: bool,
-    pub currently_hovering_over_unencrypted: bool,
+fn pad_prose(blocks: Vec<Block>) -> Vec<Block> {
+    let mut padded: Vec<Block> = Vec::with_capacity(blocks.len() + 4);
+    for block in blocks {
+        let previous_is_blank = padded
+            .last()
+            .map(|previous| matches!(previous, Block::Blank))
+            .unwrap_or(true);
+        let previous_is_prose = padded
+            .last()
+            .map(|previous| matches!(previous, Block::Paragraph { .. }))
+            .unwrap_or(false);
+        let starts_prose = matches!(block, Block::Paragraph { .. });
+        let follows_prose = previous_is_prose && !matches!(block, Block::Blank);
+        if (starts_prose && !previous_is_blank) || follows_prose {
+            padded.push(Block::Blank);
+        }
+        padded.push(block);
+    }
+    padded
 }
 
-impl WebServerStatusSection {
-    pub fn new(
-        web_server_started: bool,
-        web_server_error: Option<String>,
-        web_server_different_version_error: Option<String>,
-        web_server_base_url: String,
-        connection_is_unencrypted: bool,
-    ) -> Self {
-        WebServerStatusSection {
-            web_server_started,
-            clickable_urls: HashMap::new(),
-            currently_hovering_over_link: false,
-            currently_hovering_over_unencrypted: false,
-            web_server_error,
-            web_server_different_version_error,
-            web_server_base_url,
-            connection_is_unencrypted,
-        }
-    }
-
-    pub fn web_server_status_width_and_height(&self) -> (usize, usize) {
-        let mut max_len = self.web_server_status_line().1;
-
-        if let Some(error) = &self.web_server_error {
-            max_len = std::cmp::max(max_len, self.web_server_error_component(error).1);
-        } else if let Some(different_version) = &self.web_server_different_version_error {
-            max_len = std::cmp::max(
-                max_len,
-                self.web_server_different_version_error_component(different_version)
-                    .1,
-            );
-        } else if self.web_server_started {
-            let url_display = format_url_with_encryption_marker(
-                &self.web_server_base_url,
-                self.connection_is_unencrypted,
-            );
-            max_len = std::cmp::max(
-                max_len,
-                URL_TITLE.chars().count() + url_display.chars().count(),
-            );
-        } else {
-            max_len = std::cmp::max(max_len, self.start_server_line().1);
-        }
-
-        (max_len, 2)
-    }
-
-    pub fn render_web_server_status(
-        &mut self,
-        x: usize,
-        y: usize,
-        hover_coordinates: Option<(usize, usize)>,
-    ) {
-        let web_server_status_line = self.web_server_status_line().0;
-        print_text_with_coordinates(web_server_status_line, x, y, None, None);
-
-        if let Some(error) = &self.web_server_error {
-            let error_component = self.web_server_error_component(error).0;
-            print_text_with_coordinates(error_component, x, y + 1, None, None);
-        } else if let Some(different_version) = &self.web_server_different_version_error {
-            let version_error_component = self
-                .web_server_different_version_error_component(different_version)
-                .0;
-            print_text_with_coordinates(version_error_component, x, y + 1, None, None);
-        } else if self.web_server_started {
-            self.render_server_url(x, y, hover_coordinates);
-        } else {
-            let info_line = self.start_server_line().0;
-            print_text_with_coordinates(info_line, x, y + 1, None, None);
-        }
-    }
-
-    fn render_server_url(&mut self, x: usize, y: usize, hover_coordinates: Option<(usize, usize)>) {
-        let server_url = &self.web_server_base_url;
-        let url_x = x + URL_TITLE.chars().count();
-        let url_width = server_url.chars().count();
-        let url_y = y + 1;
-
-        self.clickable_urls.insert(
-            CoordinatesInLine::new(url_x, url_y, url_width),
-            server_url.clone(),
-        );
-
-        let info_line = if self.connection_is_unencrypted {
-            let full_text = format!("{}{}{}", URL_TITLE, server_url, UNENCRYPTED_MARKER);
-            ColoredTextBuilder::new(full_text)
-                .highlight_range(0, URL_TITLE.chars().count(), COLOR_INDEX_0)
-                .highlight_substring(UNENCRYPTED_MARKER, COLOR_INDEX_1)
-                .build()
-                .0
-        } else {
-            create_titled_text(URL_TITLE, server_url, COLOR_INDEX_0, COLOR_INDEX_1).0
-        };
-
-        print_text_with_coordinates(info_line, x, y + 1, None, None);
-
-        if hovering_on_line(url_x, url_y, url_width, hover_coordinates) {
-            self.currently_hovering_over_link = true;
-            render_text_with_underline(url_x, url_y, server_url);
-        }
-    }
-
-    fn web_server_status_line(&self) -> (Text, usize) {
-        if self.web_server_started {
-            self.create_running_status_line()
-        } else if let Some(different_version) = &self.web_server_different_version_error {
-            self.create_incompatible_version_line(different_version)
-        } else {
-            create_titled_text(
-                WEB_SERVER_TITLE,
-                WEB_SERVER_NOT_RUNNING,
-                COLOR_INDEX_0,
-                COLOR_HIGHLIGHT,
-            )
-        }
-    }
-
-    fn create_running_status_line(&self) -> (Text, usize) {
-        let full_text = format!("{}{}{}", WEB_SERVER_TITLE, WEB_SERVER_RUNNING, CTRL_C_STOP);
-        ColoredTextBuilder::new(full_text)
-            .highlight_range(0, WEB_SERVER_TITLE.chars().count(), COLOR_INDEX_0)
-            .highlight_substring(WEB_SERVER_RUNNING.trim(), COLOR_HIGHLIGHT)
-            .highlight_substring("<Ctrl c>", COLOR_HIGHLIGHT)
-            .build()
-    }
-
-    fn create_incompatible_version_line(&self, different_version: &str) -> (Text, usize) {
-        let value = format!("{}{}", WEB_SERVER_INCOMPATIBLE_PREFIX, different_version);
-        create_titled_text(WEB_SERVER_TITLE, &value, COLOR_INDEX_0, COLOR_HIGHLIGHT)
-    }
-
-    fn start_server_line(&self) -> (Text, usize) {
-        create_highlighted_shortcut(PRESS_ENTER_START, "<ENTER>", COLOR_HIGHLIGHT)
-    }
-
-    fn web_server_error_component(&self, error: &str) -> (Text, usize) {
-        let text = format!("{}{}", ERROR_PREFIX, error);
-        ColoredTextBuilder::new(text)
-            .highlight_all(COLOR_HIGHLIGHT)
-            .build()
-    }
-
-    fn web_server_different_version_error_component(&self, _version: &str) -> (Text, usize) {
-        create_highlighted_shortcut(CTRL_C_STOP_OTHER, "<Ctrl c>", COLOR_HIGHLIGHT)
-    }
-}
-
-#[derive(Debug)]
-pub struct CurrentSessionSection {
-    web_server_started: bool,
-    web_server_ip: Option<IpAddr>,
-    web_server_port: Option<u16>,
-    web_sharing: WebSharing,
-    session_name: Option<String>,
-    connection_is_unencrypted: bool,
-    pub clickable_urls: HashMap<CoordinatesInLine, String>,
-    pub currently_hovering_over_link: bool,
-}
-
-impl CurrentSessionSection {
-    pub fn new(
-        web_server_started: bool,
-        web_server_ip: Option<IpAddr>,
-        web_server_port: Option<u16>,
-        session_name: Option<String>,
-        web_sharing: WebSharing,
-        connection_is_unencrypted: bool,
-    ) -> Self {
-        CurrentSessionSection {
-            web_server_started,
-            web_server_ip,
-            web_server_port,
-            session_name,
-            web_sharing,
-            clickable_urls: HashMap::new(),
-            currently_hovering_over_link: false,
-            connection_is_unencrypted,
-        }
-    }
-
-    pub fn current_session_status_width_and_height(&self) -> (usize, usize) {
-        let mut max_len = self.get_session_status_line_length();
-
-        if self.web_sharing.web_clients_allowed() && self.web_server_started {
-            let url_display = format_url_with_encryption_marker(
-                &self.session_url(),
-                self.connection_is_unencrypted,
-            );
-            max_len = std::cmp::max(
-                max_len,
-                SESSION_URL_TITLE.chars().count() + url_display.chars().count(),
-            );
-        } else if self.web_sharing.web_clients_allowed() {
-            max_len = std::cmp::max(max_len, WEB_SERVER_OFFLINE.chars().count());
-        } else {
-            max_len = std::cmp::max(max_len, self.press_space_to_share().1);
-        }
-
-        (max_len, 2)
-    }
-
-    fn get_session_status_line_length(&self) -> usize {
-        match self.web_sharing {
-            WebSharing::On => self.render_current_session_sharing().1,
-            WebSharing::Disabled => self.render_sharing_is_disabled().1,
-            WebSharing::Off => self.render_not_sharing().1,
-        }
-    }
-
-    pub fn render_current_session_status(
-        &mut self,
-        x: usize,
-        y: usize,
-        hover_coordinates: Option<(usize, usize)>,
-    ) {
-        let status_line = match self.web_sharing {
-            WebSharing::On => self.render_current_session_sharing().0,
-            WebSharing::Disabled => self.render_sharing_is_disabled().0,
-            WebSharing::Off => self.render_not_sharing().0,
-        };
-
-        print_text_with_coordinates(status_line, x, y, None, None);
-
-        if self.web_sharing.web_clients_allowed() && self.web_server_started {
-            self.render_session_url(x, y, hover_coordinates);
-        } else if self.web_sharing.web_clients_allowed() {
-            let info_line = Text::new(WEB_SERVER_OFFLINE);
-            print_text_with_coordinates(info_line, x, y + 1, None, None);
-        } else if !self.web_sharing.sharing_is_disabled() {
-            let info_line = self.press_space_to_share().0;
-            print_text_with_coordinates(info_line, x, y + 1, None, None);
-        }
-    }
-
-    fn render_session_url(
-        &mut self,
-        x: usize,
-        y: usize,
-        hover_coordinates: Option<(usize, usize)>,
-    ) {
-        let session_url = self.session_url();
-        let url_x = x + SESSION_URL_TITLE.chars().count();
-        let url_width = session_url.chars().count();
-        let url_y = y + 1;
-
-        self.clickable_urls.insert(
-            CoordinatesInLine::new(url_x, url_y, url_width),
-            session_url.clone(),
-        );
-
-        let info_line = if self.connection_is_unencrypted {
-            let full_text = format!("{}{}{}", SESSION_URL_TITLE, session_url, UNENCRYPTED_MARKER);
-            ColoredTextBuilder::new(full_text)
-                .highlight_range(0, SESSION_URL_TITLE.chars().count(), COLOR_INDEX_0)
-                .highlight_substring(UNENCRYPTED_MARKER, COLOR_INDEX_1)
-                .build()
-                .0
-        } else {
-            create_titled_text(
-                SESSION_URL_TITLE,
-                &session_url,
-                COLOR_INDEX_0,
-                COLOR_INDEX_1,
-            )
-            .0
-        };
-
-        print_text_with_coordinates(info_line, x, y + 1, None, None);
-
-        if hovering_on_line(url_x, url_y, url_width, hover_coordinates) {
-            self.currently_hovering_over_link = true;
-            render_text_with_underline(url_x, url_y, &session_url);
-        }
-    }
-
-    fn render_current_session_sharing(&self) -> (Text, usize) {
-        let full_text = format!("{}{}", CURRENT_SESSION_TITLE, SHARING_STATUS);
-        ColoredTextBuilder::new(full_text)
-            .highlight_range(0, CURRENT_SESSION_TITLE.chars().count(), COLOR_INDEX_0)
-            .highlight_substring("SHARING", COLOR_HIGHLIGHT)
-            .highlight_substring("<SPACE>", COLOR_HIGHLIGHT)
-            .build()
-    }
-
-    fn render_sharing_is_disabled(&self) -> (Text, usize) {
-        create_titled_text(
-            CURRENT_SESSION_TITLE,
-            SHARING_DISABLED,
-            COLOR_INDEX_0,
-            COLOR_HIGHLIGHT,
-        )
-    }
-
-    fn render_not_sharing(&self) -> (Text, usize) {
-        create_titled_text(
-            CURRENT_SESSION_TITLE,
-            NOT_SHARING,
-            COLOR_INDEX_0,
-            COLOR_HIGHLIGHT,
-        )
-    }
-
-    fn session_url(&self) -> String {
-        let web_server_ip = self
-            .web_server_ip
-            .map(|i| i.to_string())
-            .unwrap_or_else(|| "UNDEFINED".to_owned());
-        let web_server_port = self
-            .web_server_port
-            .map(|p| p.to_string())
-            .unwrap_or_else(|| "UNDEFINED".to_owned());
-        let prefix = if self.connection_is_unencrypted {
-            "http"
-        } else {
-            "https"
-        };
-        let session_name = self.session_name.as_deref().unwrap_or("");
-
-        format!(
-            "{}://{}:{}/{}",
-            prefix, web_server_ip, web_server_port, session_name
-        )
-    }
-
-    fn press_space_to_share(&self) -> (Text, usize) {
-        create_highlighted_shortcut(PRESS_SPACE_SHARE, "<SPACE>", COLOR_HIGHLIGHT)
-    }
-}
-
-const DISPLAY_WARNING: &str = "This link contains a secret. Consider copying it directly to your clipboard instead of displaying it first.";
-const WARNING_TITLE: &str = "Warning";
-
-const DISPLAY_HELP_WIDE: &str = "<d> - Display anyway, <c> - Copy to clipboard, <ESC> - back";
-const DISPLAY_HELP_MED: &str = "<d> - Display, <c> - Copy, <ESC> - back";
-const DISPLAY_HELP_NARROW: &str = "<d>/<c>/<ESC>";
-
-const REVEALED_HELP_WIDE: &str = "<c> - Copy to clipboard, <ESC> - back";
-const REVEALED_HELP_MED: &str = "<c> - Copy, <ESC> - back";
-const REVEALED_HELP_NARROW: &str = "<c>/<ESC>";
-
-fn display_help_texts(revealed: bool) -> (&'static str, &'static str, &'static str) {
-    if revealed {
-        (REVEALED_HELP_WIDE, REVEALED_HELP_MED, REVEALED_HELP_NARROW)
-    } else {
-        (DISPLAY_HELP_WIDE, DISPLAY_HELP_MED, DISPLAY_HELP_NARROW)
-    }
-}
-
-fn display_help_tier(available_cols: usize, revealed: bool) -> usize {
-    let (wide, med, _narrow) = display_help_texts(revealed);
-    if available_cols >= wide.chars().count() {
-        2
-    } else if available_cols >= med.chars().count() {
-        1
-    } else {
-        0
-    }
-}
-
-fn display_help_width(available_cols: usize, revealed: bool) -> usize {
-    let (wide, med, narrow) = display_help_texts(revealed);
-    match display_help_tier(available_cols, revealed) {
-        2 => wide.chars().count(),
-        1 => med.chars().count(),
-        _ => narrow.chars().count(),
-    }
-}
-
-fn render_display_help(base_x: usize, y: usize, tier: usize, revealed: bool) {
-    let (wide, med, narrow) = display_help_texts(revealed);
-    let text = match tier {
-        2 => wide,
-        1 => med,
-        _ => narrow,
-    };
-    let styled = Text::new(text)
-        .color_substring(3, "<d>")
-        .color_substring(3, "<c>")
-        .color_substring(3, "<ESC>");
-    print_text_with_coordinates(styled, base_x, y, None, None);
-}
-
-/// Shared warning/reveal sub-screen for secret-bearing links (guest links and
-/// device-enrollment links). `title_prefix` is the coloured prefix shown before
-/// the link label once revealed (e.g. `"Guest link:"` or `"Enrollment link:"`).
-pub fn render_secret_link_screen(
+pub fn render_centered(
+    blocks: Vec<Block>,
     rows: usize,
     cols: usize,
-    title_prefix: &str,
-    label: &str,
-    url: &str,
-    revealed: bool,
-    hover_coordinates: Option<(usize, usize)>,
-    clickable_urls: &mut HashMap<CoordinatesInLine, String>,
+    hover: Option<(usize, usize)>,
+    clickable: &mut HashMap<CoordinatesInLine, String>,
 ) {
-    let available_cols = cols.saturating_sub(2);
+    if rows == 0 || cols == 0 {
+        return;
+    }
+    let blocks = pad_prose(blocks);
+    let available = cols.saturating_sub(2).max(1);
 
-    let display_title = if revealed {
-        format!("{} {}", title_prefix, label)
-    } else {
-        WARNING_TITLE.to_owned()
-    };
-    let title_w = display_title.chars().count();
-    let help_tier = display_help_tier(available_cols, revealed);
-    let help_w = display_help_width(available_cols, revealed);
+    let rigid = blocks
+        .iter()
+        .map(|block| block.rigid_width())
+        .max()
+        .unwrap_or(0);
+    let soft = blocks
+        .iter()
+        .map(|block| block.soft_width())
+        .max()
+        .unwrap_or(0);
+    let width = rigid.max(soft).max(1).min(available);
 
-    let body_source_w = if revealed { url.chars().count() } else { help_w };
+    let mut heights: Vec<usize> = blocks.iter().map(|block| block.height(width)).collect();
 
-    let max_w = title_w.max(help_w).max(body_source_w);
-    let effective_width = max_w.max(1).min(available_cols);
-    let base_x = available_cols.saturating_sub(effective_width) / 2;
+    if let Some(index) = blocks
+        .iter()
+        .position(|block| matches!(block, Block::List { .. }))
+    {
+        let mut fixed: usize = heights
+            .iter()
+            .enumerate()
+            .filter(|(position, _)| *position != index)
+            .map(|(_, height)| *height)
+            .sum();
+        let wanted = heights[index].min(MIN_LIST_ROWS);
 
-    let wrap_width = if revealed { effective_width } else { help_w.max(1) };
-    let body_wrapped = if revealed {
-        crate::online_tab::word_wrap(url, wrap_width)
-    } else {
-        crate::online_tab::word_wrap(DISPLAY_WARNING, wrap_width)
-    };
-    let body_lines = body_wrapped.len();
-
-    let total_height = 1 + 1 + body_lines + 1 + 1;
-    let base_y = rows.saturating_sub(total_height.min(rows)) / 2;
-
-    let title_y = base_y;
-    let body_start_y = base_y + 2;
-    let help_y = body_start_y + body_lines + 1;
-
-    if revealed {
-        let prefix_len = title_prefix.chars().count();
-        let name_start = prefix_len + 1;
-        let name_end = name_start + label.chars().count();
-        let title_text = Text::new(&display_title)
-            .color_range(2, 0..prefix_len)
-            .color_range(1, name_start..name_end);
-        print_text_with_coordinates(title_text, base_x, title_y, None, None);
-    } else {
-        print_text_with_coordinates(
-            Text::new(&display_title).error_color_all(),
-            base_x,
-            title_y,
-            None,
-            None,
-        );
+        for position in 0..blocks.len() {
+            if fixed + wanted <= rows {
+                break;
+            }
+            if position != index && matches!(blocks[position], Block::Paragraph { .. }) {
+                fixed -= heights[position];
+                heights[position] = 0;
+                let next = position + 1;
+                if next != index
+                    && matches!(blocks.get(next), Some(Block::Blank))
+                    && heights[next] > 0
+                {
+                    fixed -= heights[next];
+                    heights[next] = 0;
+                }
+            }
+        }
+        for position in 0..blocks.len() {
+            if fixed + wanted <= rows {
+                break;
+            }
+            if position != index && matches!(blocks[position], Block::Blank) {
+                fixed -= heights[position];
+                heights[position] = 0;
+            }
+        }
+        heights[index] = heights[index].min(rows.saturating_sub(fixed));
     }
 
-    let mut y = body_start_y;
-    for line in &body_wrapped {
-        if y >= rows.saturating_sub(1) {
+    let total: usize = heights.iter().sum();
+    let mut y = rows.saturating_sub(total) / 2;
+    let x = (cols.saturating_sub(width)) / 2;
+
+    for (block, height) in blocks.into_iter().zip(heights) {
+        if height == 0 {
+            continue;
+        }
+        if y >= rows {
             break;
         }
-        if revealed {
-            let line_width = line.chars().count();
-            print_text_with_coordinates(Text::new(line), base_x, y, None, None);
-            clickable_urls.insert(
-                CoordinatesInLine::new(base_x, y, line_width),
-                url.to_owned(),
-            );
-            if hovering_on_line(base_x, y, line_width, hover_coordinates) {
-                render_text_with_underline(base_x, y, line);
-            }
-        } else {
-            print_text_with_coordinates(Text::new(line), base_x, y, None, None);
-        }
-        y += 1;
+        draw_block(block, x, y, width, height.min(rows - y), hover, clickable);
+        y += height;
     }
+}
 
-    if help_y < rows {
-        render_display_help(base_x, help_y, help_tier, revealed);
+fn tone_text(line: &str, tone: StatusTone) -> Text {
+    match tone {
+        StatusTone::Good => Text::new(line).success_color_range(..),
+        StatusTone::Alert => Text::new(line).error_color_range(..),
+        StatusTone::Neutral => quiet(line),
+    }
+}
+
+fn draw_block(
+    block: Block,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    hover: Option<(usize, usize)>,
+    clickable: &mut HashMap<CoordinatesInLine, String>,
+) {
+    match block {
+        Block::Blank => {},
+        Block::Status { text, tone } => {
+            for (offset, line) in word_wrap(&text, width).into_iter().take(height).enumerate() {
+                print_text_with_coordinates(
+                    tone_text(&line, tone),
+                    x,
+                    y + offset,
+                    Some(width),
+                    Some(1),
+                );
+            }
+        },
+        Block::Title(text) => {
+            for (offset, line) in word_wrap(&text, width).into_iter().take(height).enumerate() {
+                print_text_with_coordinates(
+                    Text::new(&line).color_range(TITLE, ..),
+                    x,
+                    y + offset,
+                    Some(width),
+                    Some(1),
+                );
+            }
+        },
+        Block::Field { label, value, tone } => {
+            let label_width = label.chars().count();
+            let stacked = label_width + 4 >= width;
+            if stacked {
+                print_text_with_coordinates(
+                    quiet(label.trim_end()),
+                    x,
+                    y,
+                    Some(width),
+                    Some(1),
+                );
+                for (offset, line) in word_wrap(&value, width).into_iter().enumerate() {
+                    if offset + 1 >= height {
+                        break;
+                    }
+                    print_text_with_coordinates(
+                        tone_text(&line, tone),
+                        x,
+                        y + offset + 1,
+                        Some(width),
+                        Some(1),
+                    );
+                }
+                return;
+            }
+            let body = wrap_after_label(&value, width - label_width, false);
+            for (offset, line) in body.into_iter().take(height).enumerate() {
+                let composed = if offset == 0 {
+                    format!("{}{}", label, line)
+                } else {
+                    format!("{}{}", " ".repeat(label_width), line)
+                };
+                let element = tone_text(&composed, tone).unbold_range(0..label_width);
+                print_text_with_coordinates(
+                    element,
+                    x,
+                    y + offset,
+                    Some(width),
+                    Some(1),
+                );
+            }
+        },
+        Block::Paragraph { text } => {
+            for (offset, line) in word_wrap(&text, width).into_iter().take(height).enumerate() {
+                print_text_with_coordinates(quiet(&line), x, y + offset, Some(width), Some(1));
+            }
+        },
+        Block::Url {
+            prefix,
+            prefix_tone,
+            display,
+            target,
+            crop,
+        } => {
+            if crop {
+                let prefix_width = prefix.chars().count().min(width);
+                let shown = truncate_end(&display, width.saturating_sub(prefix_width));
+                let shown_width = shown.chars().count();
+                let composed = format!("{}{}", prefix, shown);
+                let element = Text::new(&composed)
+                    .color_range(VALUE, prefix_width..prefix_width + shown_width)
+                    .unbold_range(0..prefix_width);
+                print_text_with_coordinates(element, x, y, Some(width), Some(1));
+                if !target.is_empty() {
+                    let url_x = x + prefix_width;
+                    clickable.insert(CoordinatesInLine::new(url_x, y, shown_width), target);
+                    if hovering_on_line(url_x, y, shown_width, hover) {
+                        render_text_with_underline(url_x, y, &shown);
+                    }
+                }
+                return;
+            }
+            let prefix_width = prefix.chars().count();
+            let stacked = prefix_width + 8 >= width;
+            let (indent, first_row) = if stacked {
+                if !prefix.trim().is_empty() {
+                    let element = match prefix_tone {
+                        Some(tone) => tone_text(prefix.trim_end(), tone),
+                        None => quiet(prefix.trim_end()),
+                    };
+                    print_text_with_coordinates(element, x, y, Some(width), Some(1));
+                    (0, 1)
+                } else {
+                    (0, 0)
+                }
+            } else {
+                (prefix_width, 0)
+            };
+
+            let body_width = width.saturating_sub(indent).max(1);
+            for (offset, line) in chunk(&display, body_width).into_iter().enumerate() {
+                let row = first_row + offset;
+                if row >= height {
+                    break;
+                }
+                let line_width = line.chars().count();
+                let composed = if offset == 0 && indent > 0 {
+                    format!("{}{}", prefix, line)
+                } else {
+                    format!("{}{}", " ".repeat(indent), line)
+                };
+                let mut element =
+                    Text::new(&composed).color_range(VALUE, indent..indent + line_width);
+                if offset == 0 && indent > 0 {
+                    element = match prefix_tone {
+                        Some(StatusTone::Good) => element.success_color_range(0..prefix_width),
+                        Some(StatusTone::Alert) => element.error_color_range(0..prefix_width),
+                        Some(StatusTone::Neutral) | None => element.unbold_range(0..prefix_width),
+                    };
+                }
+                print_text_with_coordinates(element, x, y + row, Some(width), Some(1));
+                if !target.is_empty() {
+                    let url_x = x + indent;
+                    let url_y = y + row;
+                    clickable.insert(
+                        CoordinatesInLine::new(url_x, url_y, line_width),
+                        target.clone(),
+                    );
+                    if hovering_on_line(url_x, url_y, line_width, hover) {
+                        render_text_with_underline(url_x, url_y, &line);
+                    }
+                }
+            }
+        },
+        Block::Keys(text) => {
+            for (offset, line) in wrap_hints(&text, width).into_iter().take(height).enumerate() {
+                print_text_with_coordinates(
+                    highlight_keys(&line),
+                    x,
+                    y + offset,
+                    Some(width),
+                    Some(1),
+                );
+            }
+        },
+        Block::Bullets(lines) => {
+            let inner = width.saturating_sub(3).max(1);
+            let mut row = 0;
+            for line in lines {
+                let key_end = line.find('>').map(|offset| offset + 1);
+                for (index, part) in wrap_bullet(&line, inner).into_iter().enumerate() {
+                    if row >= height {
+                        break;
+                    }
+                    let composed = if index == 0 {
+                        format!(" > {}", part)
+                    } else {
+                        format!("   {}", part)
+                    };
+                    let mut element = Text::new(&composed);
+                    if index == 0 {
+                        if let Some(end) = key_end {
+                            element = element.color_range(KEY, 3..3 + end);
+                        }
+                    }
+                    print_text_with_coordinates(element, x, y + row, Some(width), Some(1));
+                    row += 1;
+                }
+            }
+        },
+        Block::Prompt {
+            label,
+            buffer,
+            hint,
+        } => {
+            let label_width = label.chars().count();
+            let full = format!("{}{}_ {}", label, buffer, hint);
+            let line = if full.chars().count() <= width {
+                full
+            } else {
+                let without_hint = format!("{}{}_", label, buffer);
+                if without_hint.chars().count() <= width {
+                    without_hint
+                } else {
+                    let room = width.saturating_sub(label_width + 1);
+                    let tail: String = buffer
+                        .chars()
+                        .skip(buffer.chars().count().saturating_sub(room))
+                        .collect();
+                    format!("{}{}_", label, tail)
+                }
+            };
+            print_text_with_coordinates(
+                highlight_keys(&line).color_range(TITLE, 0..label_width.min(width)),
+                x,
+                y,
+                Some(width),
+                Some(1),
+            );
+        },
+        Block::Nav(items) => {
+            print_text_with_coordinates(
+                Text::new(NAV_KEY).color_range(KEY, ..),
+                x,
+                y,
+                Some(NAV_KEY.chars().count()),
+                Some(1),
+            );
+            let mut offset = NAV_KEY.chars().count() + NAV_GAP;
+            for item in items {
+                if offset + item.label.chars().count() + RIBBON_PADDING > width {
+                    break;
+                }
+                let mut ribbon = Text::new(&item.label);
+                if item.selected {
+                    ribbon = ribbon.selected();
+                }
+                if !item.enabled {
+                    ribbon = ribbon.disabled();
+                }
+                print_ribbon_with_coordinates(ribbon, x + offset, y, None, None);
+                offset += item.label.chars().count() + RIBBON_PADDING;
+            }
+        },
+        Block::Hints { label, hints } => {
+            let label_width = label.chars().count();
+            let body_width = width.saturating_sub(label_width).max(1);
+            for (offset, line) in wrap_hints(&hints, body_width)
+                .into_iter()
+                .take(height)
+                .enumerate()
+            {
+                if offset == 0 {
+                    print_text_with_coordinates(
+                        quiet(&label),
+                        x,
+                        y,
+                        Some(label_width),
+                        Some(1),
+                    );
+                }
+                print_text_with_coordinates(
+                    highlight_keys(&line),
+                    x + label_width,
+                    y + offset,
+                    Some(body_width),
+                    Some(1),
+                );
+            }
+        },
+        Block::Message { text, is_error } => {
+            for (offset, line) in word_wrap(&text, width).into_iter().take(height).enumerate() {
+                let element = if is_error {
+                    Text::new(&line).error_color_range(..)
+                } else {
+                    Text::new(&line).success_color_range(..)
+                };
+                print_text_with_coordinates(element, x, y + offset, Some(width), Some(1));
+            }
+        },
+        Block::List { rows, selected } => {
+            crate::list::render_rows(
+                &rows,
+                selected,
+                crate::list::ListArea {
+                    x,
+                    y,
+                    width,
+                    height,
+                },
+            );
+        },
+        Block::Empty { message, keys } => {
+            let inner = width.saturating_sub(1).max(1);
+            let mut row = 0;
+            for line in word_wrap(&message, inner) {
+                if row >= height {
+                    break;
+                }
+                print_text_with_coordinates(
+                    quiet(&line),
+                    x + 1,
+                    y + row,
+                    Some(inner),
+                    Some(1),
+                );
+                row += 1;
+            }
+            for line in wrap_hints(&keys, inner) {
+                if row >= height {
+                    break;
+                }
+                print_text_with_coordinates(
+                    highlight_keys(&line),
+                    x + 1,
+                    y + row,
+                    Some(inner),
+                    Some(1),
+                );
+                row += 1;
+            }
+        },
+    }
+}
+
+pub fn footer(message: Option<(&str, bool)>, label: &str, hints: &str) -> Block {
+    match message {
+        Some((text, is_error)) => Block::Message {
+            text: text.to_owned(),
+            is_error,
+        },
+        None => Block::hints(label, hints),
     }
 }
 
@@ -771,7 +909,7 @@ pub fn hovering_on_line(
 
 pub fn render_text_with_underline(url_x: usize, url_y: usize, url_text: &str) {
     print!(
-        "\u{1b}[{};{}H\u{1b}[m\u{1b}[1;4m{}",
+        "\u{1b}[{};{}H\u{1b}[m\u{1b}[4m{}",
         url_y + 1,
         url_x + 1,
         url_text,
