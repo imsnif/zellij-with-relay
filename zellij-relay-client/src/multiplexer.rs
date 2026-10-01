@@ -210,6 +210,7 @@ pub async fn run_multiplexer(
             let _ = tokio::join!(control_reader, terminal_reader);
         },
     }
+    log::info!("relay-debug: multiplexer torn down, relay sockets dropped");
     exit_reason
 }
 

@@ -6,6 +6,7 @@
 //! `relay_tunnel_auth_tokens` for schema and storage details.
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use anyhow::Context;
 use clap::Parser;
@@ -65,6 +66,7 @@ async fn async_main() -> anyhow::Result<()> {
     } else {
         tracing::info!("standalone mode: tunnel auth via local sqlite token store");
     }
+    let shutdown_state = app_state.clone();
     let app = router::build_router(app_state);
 
     let addr: SocketAddr = cfg
@@ -76,10 +78,40 @@ async fn async_main() -> anyhow::Result<()> {
         .with_context(|| format!("failed to bind {addr}"))?;
     tracing::info!(%addr, "listening");
 
-    axum::serve(listener, app.into_make_service())
-        .await
-        .context("axum serve failed")?;
+    tokio::select! {
+        result = axum::serve(listener, app.into_make_service()) => {
+            result.context("axum serve failed")?;
+        },
+        signal = shutdown_signal() => {
+            signal?;
+            let stopped = zellij_relay_server::tunnel_control::stop_all_tunnels(&shutdown_state);
+            tracing::info!(tunnels = stopped, "shutting down; reporting live tunnels as stopped");
+            if !shutdown_state.event_sink.flush(SHUTDOWN_FLUSH_BUDGET).await {
+                tracing::warn!("shutdown: some relay events may not have been delivered");
+            }
+        },
+    }
     Ok(())
+}
+
+const SHUTDOWN_FLUSH_BUDGET: Duration = Duration::from_secs(8);
+
+#[cfg(unix)]
+async fn shutdown_signal() -> anyhow::Result<()> {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("failed to install SIGTERM handler")?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => result.context("failed to listen for Ctrl-C")?,
+        _ = terminate.recv() => {},
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() -> anyhow::Result<()> {
+    tokio::signal::ctrl_c()
+        .await
+        .context("failed to listen for Ctrl-C")
 }
 
 fn run_create_token(label: Option<String>) -> anyhow::Result<()> {

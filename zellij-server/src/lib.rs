@@ -1399,9 +1399,20 @@ pub fn start_server_impl(
                                 .load(std::sync::atomic::Ordering::Relaxed)
                         })
                         .unwrap_or(false);
-                    if !session_state.read().unwrap().active_clients_are_connected()
-                        && !relay_share_active
-                    {
+                    let other_clients_connected =
+                        session_state.read().unwrap().active_clients_are_connected();
+                    log::info!(
+                        "relay-debug: ClientExit client_id={} other_clients_connected={} relay_share_active={} -> {}",
+                        client_id,
+                        other_clients_connected,
+                        relay_share_active,
+                        if !other_clients_connected {
+                            "ending session"
+                        } else {
+                            "keeping session alive"
+                        }
+                    );
+                    if !other_clients_connected {
                         *session_data.write().unwrap() = None;
                         let client_ids_to_cleanup: Vec<ClientId> = session_state
                             .read()
@@ -1479,6 +1490,7 @@ pub fn start_server_impl(
                 remove_client!(client_id, os_input, session_state, session_data);
             },
             ServerInstruction::KillSession => {
+                log::info!("relay-debug: KillSession received");
                 let client_ids = session_state.read().unwrap().client_ids();
                 for client_id in client_ids {
                     let _ = os_input.send_to_client(
@@ -2149,10 +2161,12 @@ pub fn start_server_impl(
         }
     }
 
+    log::info!("relay-debug: server main loop exited, dropping session data");
     // Drop cached session data before exit.
     *session_data.write().unwrap() = None;
 
     drop(std::fs::remove_file(&socket_path));
+    log::info!("relay-debug: server exiting");
 }
 
 fn init_session(

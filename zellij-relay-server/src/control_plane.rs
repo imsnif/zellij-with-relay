@@ -120,7 +120,11 @@ impl ControlPlaneClient {
 
     /// `POST {base}/api/relay/events`. `Err` on transport error or non-2xx —
     /// the caller (the event sender task) retries.
-    pub async fn post_event(&self, event: &RelayEvent, timeout: Duration) -> anyhow::Result<()> {
+    pub async fn post_event(
+        &self,
+        event: &RelayEvent,
+        timeout: Duration,
+    ) -> Result<(), PostEventError> {
         let url = format!("{}/api/relay/events", self.base_url);
         let resp = self
             .http
@@ -129,11 +133,37 @@ impl ControlPlaneClient {
             .json(event)
             .timeout(timeout)
             .send()
-            .await?;
-        if !resp.status().is_success() {
-            anyhow::bail!("control plane events endpoint returned {}", resp.status());
+            .await
+            .map_err(|e| PostEventError::Transient(e.to_string()))?;
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(());
         }
-        Ok(())
+        let message = format!("control plane events endpoint returned {}", status);
+        if status.is_server_error()
+            || status == reqwest::StatusCode::REQUEST_TIMEOUT
+            || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        {
+            Err(PostEventError::Transient(message))
+        } else {
+            Err(PostEventError::Permanent(message))
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum PostEventError {
+    Transient(String),
+    Permanent(String),
+}
+
+impl std::fmt::Display for PostEventError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PostEventError::Transient(message) | PostEventError::Permanent(message) => {
+                f.write_str(message)
+            },
+        }
     }
 }
 

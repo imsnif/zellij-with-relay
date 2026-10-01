@@ -658,7 +658,11 @@ impl App {
         match relay_resolve_admission(client_id, admit, code_confirmed) {
             Ok(()) => {
                 self.info = Some(if admit { "Admitted." } else { "Rejected." }.to_owned());
-                self.refresh_admissions();
+                self.admissions.retain(|a| a.client_id != client_id);
+                self.admission_selected = clamp(self.admission_selected, self.admissions.len());
+                if self.admissions.is_empty() {
+                    self.admission_dismissed = false;
+                }
                 self.refresh_links();
             },
             Err(e) => self.error = Some(e),

@@ -10,6 +10,8 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot, Notify};
 use uuid::Uuid;
 
+use crate::events::ViewerCountReporter;
+
 /// A fresh, random 32-byte terminal binding secret, lowercase hex-encoded
 /// (64 chars) — the shape both the client and `tunnel_terminal.rs` validate.
 /// Scope: per tunnel lifetime, single-tunnel (see decision #1); dies with
@@ -116,6 +118,7 @@ pub struct TunnelEntry {
     /// the client in `TunnelEstablished`. The account credential is never
     /// stored here or re-checked for the terminal socket (see decision #1).
     pub terminal_binding_secret_hash: String,
+    pub viewer_count: Arc<ViewerCountReporter>,
 }
 
 impl TunnelEntry {
@@ -168,6 +171,20 @@ impl Registry {
         g.remove(slug)
     }
 
+    pub fn remove_tunnel(&self, slug: &str, tunnel_id: Uuid) -> Option<Arc<TunnelEntry>> {
+        let mut g = self.inner.lock().unwrap();
+        if g.get(slug).is_some_and(|entry| entry.tunnel_id == tunnel_id) {
+            g.remove(slug)
+        } else {
+            None
+        }
+    }
+
+    pub fn drain(&self) -> Vec<Arc<TunnelEntry>> {
+        let mut g = self.inner.lock().unwrap();
+        g.drain().map(|(_, entry)| entry).collect()
+    }
+
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.inner.lock().unwrap().len()
@@ -180,8 +197,9 @@ mod tests {
 
     pub(crate) fn make_entry(slug: &str) -> Arc<TunnelEntry> {
         let (control_tx, _control_rx) = mpsc::unbounded_channel();
+        let tunnel_id = Uuid::new_v4();
         Arc::new(TunnelEntry {
-            tunnel_id: Uuid::new_v4(),
+            tunnel_id,
             slug: slug.into(),
             public_url: format!("http://localhost/r/{}", slug),
             session_name: "test-session".into(),
@@ -201,6 +219,10 @@ mod tests {
             user_id: None,
             credential_id: None,
             terminal_binding_secret_hash: String::new(),
+            viewer_count: ViewerCountReporter::new(
+                tunnel_id,
+                crate::events::EventSink::Noop,
+            ),
         })
     }
 
@@ -233,6 +255,32 @@ mod tests {
         let fetched = registry.get("dup").expect("entry present");
         assert_eq!(fetched.tunnel_id, second_id);
         assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn remove_tunnel_leaves_a_different_tunnel_with_the_same_slug() {
+        let registry = Registry::new();
+        let first = make_entry("dup");
+        let first_id = first.tunnel_id;
+        registry.insert(first);
+        let second = make_entry("dup");
+        let second_id = second.tunnel_id;
+        registry.insert(second);
+
+        assert!(registry.remove_tunnel("dup", first_id).is_none());
+        assert_eq!(registry.len(), 1);
+        let removed = registry.remove_tunnel("dup", second_id).expect("own entry removed");
+        assert_eq!(removed.tunnel_id, second_id);
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn drain_empties_registry() {
+        let registry = Registry::new();
+        registry.insert(make_entry("a"));
+        registry.insert(make_entry("b"));
+        assert_eq!(registry.drain().len(), 2);
+        assert_eq!(registry.len(), 0);
     }
 
     #[test]

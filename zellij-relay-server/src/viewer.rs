@@ -411,6 +411,7 @@ async fn handle_viewer_terminal(
         }
         handle.terminal_sink_tx = Some(out_tx);
         handle.disconnect_terminal = Some(disconnect_tx);
+        entry.viewer_count.set_count(viewers.len());
     }
 
     let writer = tokio::spawn(async move {
@@ -490,6 +491,7 @@ async fn handle_viewer_control(
         handle.is_read_only = session.is_read_only;
         handle.control_sink_tx = Some(out_tx);
         handle.disconnect_control = Some(disconnect_tx);
+        entry.viewer_count.set_count(viewers.len());
     }
 
     let writer = tokio::spawn(async move {
@@ -554,6 +556,7 @@ fn cleanup_viewer(entry: &Arc<TunnelEntry>, session: &ViewerSession) {
     {
         let mut viewers = entry.viewers.lock().unwrap();
         viewers.remove(&session.viewer_id);
+        entry.viewer_count.set_count(viewers.len());
     }
     entry.sessions.lock().unwrap().remove(&session.viewer_id);
     entry

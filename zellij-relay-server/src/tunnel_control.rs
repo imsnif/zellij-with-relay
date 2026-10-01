@@ -33,7 +33,7 @@ use zellij_relay_protocol::{
 
 use crate::events::{
     STOP_REASON_CONTROL_SOCKET_CLOSED, STOP_REASON_ESTABLISHED_SEND_FAILED,
-    STOP_REASON_HEARTBEAT_TIMEOUT,
+    STOP_REASON_HEARTBEAT_TIMEOUT, STOP_REASON_RELAY_SHUTDOWN, ViewerCountReporter,
 };
 use crate::heartbeat::{now_millis, spawn_server_heartbeat, HEARTBEAT_TIMEOUT_SECS};
 
@@ -216,8 +216,15 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         user_id: decision.user_id,
         credential_id: decision.credential_id,
         terminal_binding_secret_hash: binding_secret_hash,
+        viewer_count: ViewerCountReporter::new(tunnel_id, state.event_sink.clone()),
     });
     state.registry.insert(entry.clone());
+    log::info!(
+        "relay-debug: tunnel registered: slug={} tunnel_id={} hosted={}",
+        slug,
+        tunnel_id,
+        entry.user_id.is_some()
+    );
     state.event_sink.tunnel_started(&entry);
     tracing::info!(%slug, %tunnel_id, %session_name, "tunnel established");
 
@@ -229,11 +236,10 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     };
     if let Err(e) = socket.send(Message::Binary(established.encode().into())).await {
         tracing::warn!(error = %e, "failed to send TunnelEstablished");
-        if let Some(removed) = state.registry.remove(&slug) {
-            state
-                .event_sink
-                .tunnel_stopped(&removed, STOP_REASON_ESTABLISHED_SEND_FAILED);
-        }
+        state.registry.remove_tunnel(&slug, tunnel_id);
+        state
+            .event_sink
+            .tunnel_stopped(&entry, STOP_REASON_ESTABLISHED_SEND_FAILED);
         return;
     }
 
@@ -394,6 +400,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                         }
                         closed = true;
                     }
+                    reader_entry.viewer_count.set_count(viewers.len());
                 }
                 tracing::info!(
                     slug = %reader_entry.slug,
@@ -412,21 +419,44 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     }
 
     // Tunnel closing: drop registry entry and force-close all viewers.
-    if let Some(removed) = state.registry.remove(&reader_entry.slug) {
-        state.event_sink.tunnel_stopped(&removed, stop_reason);
-        let mut viewers = removed.viewers.lock().unwrap();
-        for (_client_id, mut handle) in viewers.drain() {
-            if let Some(tx) = handle.disconnect_terminal.take() {
-                let _ = tx.send(());
-            }
-            if let Some(tx) = handle.disconnect_control.take() {
-                let _ = tx.send(());
-            }
-        }
-    }
+    let removed = state
+        .registry
+        .remove_tunnel(&reader_entry.slug, reader_entry.tunnel_id)
+        .is_some();
+    log::info!(
+        "relay-debug: control socket reader ended: slug={} tunnel_id={} stop_reason={} removed_from_registry={}",
+        reader_entry.slug,
+        reader_entry.tunnel_id,
+        stop_reason,
+        removed
+    );
+    state.event_sink.tunnel_stopped(&reader_entry, stop_reason);
+    disconnect_all_viewers(&reader_entry);
     writer_handle.abort();
     hb_handle.abort();
     tracing::info!(slug = %reader_entry.slug, "tunnel closed");
+}
+
+fn disconnect_all_viewers(entry: &TunnelEntry) {
+    let mut viewers = entry.viewers.lock().unwrap();
+    for (_viewer_id, mut handle) in viewers.drain() {
+        if let Some(tx) = handle.disconnect_terminal.take() {
+            let _ = tx.send(());
+        }
+        if let Some(tx) = handle.disconnect_control.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+pub fn stop_all_tunnels(state: &AppState) -> usize {
+    let entries = state.registry.drain();
+    for entry in &entries {
+        state
+            .event_sink
+            .tunnel_stopped(entry, STOP_REASON_RELAY_SHUTDOWN);
+    }
+    entries.len()
 }
 
 async fn send_error(

@@ -434,6 +434,7 @@ pub async fn stop_relay_tunnel() -> bool {
     // read-only slug); stop them all.
     let handles = registry().remove().await;
     let any = !handles.is_empty();
+    log::info!("relay-debug: stop_relay_tunnel called, {} tunnel(s) registered", handles.len());
     guest_links::clear();
     crate::admissions::clear();
     crate::device_roster::clear();

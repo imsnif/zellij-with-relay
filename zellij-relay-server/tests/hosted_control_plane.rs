@@ -68,6 +68,8 @@ struct MockState {
     events: Vec<Value>,
     events_fail_first_n: usize,
     events_calls: usize,
+    events_reject_type: Option<String>,
+    events_rejected: usize,
 }
 
 type MockHandle = Arc<Mutex<MockState>>;
@@ -117,6 +119,12 @@ async fn mock_events(State(state): State<MockHandle>, Json(body): Json<Value>) -
     if s.events_calls <= s.events_fail_first_n {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
+    let event_type = body.get("type").and_then(|v| v.as_str());
+    if event_type.is_some() && s.events_reject_type.as_deref() == event_type {
+        s.events_rejected += 1;
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "unknown event type"})))
+            .into_response();
+    }
     s.events.push(body);
     Json(json!({"ok": true})).into_response()
 }
@@ -162,16 +170,25 @@ async fn spawn_hosted_router(
     permits: usize,
     event_cfg: EventSenderConfig,
 ) -> (String, String) {
+    let (http, ws, _state) = spawn_hosted_router_with_state(client, permits, event_cfg).await;
+    (http, ws)
+}
+
+async fn spawn_hosted_router_with_state(
+    client: ControlPlaneClient,
+    permits: usize,
+    event_cfg: EventSenderConfig,
+) -> (String, String, AppState) {
     let tunnel_auth = TunnelAuthBackend::online_with_permits(client.clone(), permits);
     let event_sink = EventSink::spawn_online(client, event_cfg);
     let state = AppState::new(URL_TEMPLATE.to_string(), vec![]).with_backends(tunnel_auth, event_sink);
-    let app = build_router(state);
+    let app = build_router(state.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         let _ = axum::serve(listener, app.into_make_service()).await;
     });
-    (format!("http://{}", addr), format!("ws://{}", addr))
+    (format!("http://{}", addr), format!("ws://{}", addr), state)
 }
 
 type WsStream =
@@ -520,4 +537,77 @@ async fn hosted_event_retry_then_success() {
         mock.lock().unwrap().events_calls >= 2,
         "expected at least one retry"
     );
+}
+
+#[tokio::test]
+async fn hosted_event_4xx_is_not_retried_and_does_not_block_later_events() {
+    let (cp_url, mock) = spawn_mock_control_plane().await;
+    mock.lock().unwrap().verify_behavior = VerifyBehavior::Valid {
+        user_id: "u1".into(),
+        credential_id: "c1".into(),
+    };
+    mock.lock().unwrap().events_reject_type = Some("tunnel_started".into());
+    let event_cfg = EventSenderConfig {
+        queue_capacity: 256,
+        request_timeout: Duration::from_millis(500),
+        retry_delays: vec![Duration::from_secs(10), Duration::from_secs(10)],
+    };
+    let (_http, ws) = spawn_hosted_router(default_client(cp_url), 32, event_cfg).await;
+
+    let (control_ws, msg) = control_auth(&ws, "zo_live_x").await;
+    let tunnel_id = match msg {
+        ControlMessage::Established { tunnel_id, .. } => tunnel_id,
+        other => panic!("expected Established, got {:?}", other),
+    };
+    drop(control_ws);
+
+    poll_for_event(&mock, Duration::from_secs(3), |e| {
+        e.get("type").and_then(|v| v.as_str()) == Some("tunnel_stopped")
+            && e.get("tunnel_id").and_then(|v| v.as_str()) == Some(tunnel_id.as_str())
+    })
+    .await
+    .expect("tunnel_stopped should not wait behind a rejected event");
+
+    assert_eq!(mock.lock().unwrap().events_rejected, 1);
+}
+
+#[tokio::test]
+async fn hosted_shutdown_reports_live_tunnels_stopped_once() {
+    let (cp_url, mock) = spawn_mock_control_plane().await;
+    mock.lock().unwrap().verify_behavior = VerifyBehavior::Valid {
+        user_id: "u1".into(),
+        credential_id: "c1".into(),
+    };
+    let event_cfg = EventSenderConfig {
+        queue_capacity: 256,
+        request_timeout: Duration::from_millis(500),
+        retry_delays: vec![Duration::from_millis(20), Duration::from_millis(20)],
+    };
+    let (_http, ws, state) =
+        spawn_hosted_router_with_state(default_client(cp_url), 32, event_cfg).await;
+
+    let (control_ws, msg) = control_auth(&ws, "zo_live_x").await;
+    let tunnel_id = match msg {
+        ControlMessage::Established { tunnel_id, .. } => tunnel_id,
+        other => panic!("expected Established, got {:?}", other),
+    };
+
+    assert_eq!(zellij_relay_server::tunnel_control::stop_all_tunnels(&state), 1);
+    assert!(state.event_sink.flush(Duration::from_secs(3)).await);
+
+    drop(control_ws);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(state.event_sink.flush(Duration::from_secs(3)).await);
+
+    let s = mock.lock().unwrap();
+    let stops: Vec<&Value> = s
+        .events
+        .iter()
+        .filter(|e| {
+            e.get("type").and_then(|v| v.as_str()) == Some("tunnel_stopped")
+                && e.get("tunnel_id").and_then(|v| v.as_str()) == Some(tunnel_id.as_str())
+        })
+        .collect();
+    assert_eq!(stops.len(), 1);
+    assert_eq!(stops[0]["reason"], "relay_shutdown");
 }

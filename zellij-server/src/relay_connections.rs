@@ -89,10 +89,12 @@ impl RelayConnection {
 
 impl Drop for RelayConnection {
     fn drop(&mut self) {
+        log::info!("relay-debug: RelayConnection dropped, sending Exit");
         let _ = self.sender.send(RelayInstruction::Exit);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+        log::info!("relay-debug: relay_connections thread joined");
     }
 }
 
@@ -120,7 +122,8 @@ fn relay_connections_main(
                     request,
                 );
             },
-            RelayInstruction::StopShare(_client_id) => {
+            RelayInstruction::StopShare(client_id) => {
+                log::info!("relay-debug: StopShare from client_id={}", client_id);
                 relay_share_active.store(false, Ordering::Relaxed);
                 let senders = bus.senders.clone();
                 let registry_lock = registry_lock.clone();
@@ -132,6 +135,10 @@ fn relay_connections_main(
                 });
             },
             RelayInstruction::Exit => {
+                log::info!(
+                    "relay-debug: relay_connections Exit, relay_share_active={}, tunnel is NOT explicitly stopped here",
+                    relay_share_active.load(Ordering::Relaxed)
+                );
                 return Ok(());
             },
         }
@@ -274,6 +281,7 @@ fn start_share(
                 }
             }
             relay_share_active.store(false, Ordering::Relaxed);
+            log::info!("relay-debug: relay status channel closed, share marked inactive");
         }
     });
 }
